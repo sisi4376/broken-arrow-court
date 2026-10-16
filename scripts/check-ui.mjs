@@ -1,0 +1,137 @@
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createApplication } from '../src/server.mjs';
+import { rawMatch, detailFor, flightPage } from '../test/helpers.mjs';
+
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const out=path.join(root,'.cache/ui');mkdirSync(out,{recursive:true});
+const directory=mkdtempSync(path.join(out,'data-'));
+const app=createApplication({directory,startScheduler:false,sourceOptions:{fetcher:async(url)=>String(url).endsWith('/match/700')?new Response(flightPage({initialMatchData:{matchInfo:detailFor(rawMatch()).data}})):new Response('{}',{status:404})}});
+app.store.setting('sync_enabled',false);
+await new Promise((resolve)=>app.server.listen(0,'127.0.0.1',resolve));
+const url=`http://127.0.0.1:${app.server.address().port}`;
+const pw=await import(process.env.PLAYWRIGHT_MODULE?pathToFileURL(process.env.PLAYWRIGHT_MODULE).href:'playwright');
+let browser;
+try{
+  try{browser=await pw.chromium.launch({headless:true,channel:'chrome'});}catch{browser=await pw.chromium.launch({headless:true});}
+  const context=await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:1});
+  const page=await context.newPage();const errors=[];page.on('pageerror',(error)=>errors.push(error.message));
+  await page.goto(url);await page.getByRole('heading',{name:'法庭开庭'}).waitFor();
+  await page.screenshot({path:path.join(out,'setup-desktop.png'),fullPage:true});
+  await page.getByLabel('朋友称呼',{exact:true}).fill('院长');
+  await page.getByLabel('登录名',{exact:true}).fill('court-test-owner');
+  await page.getByLabel('密码',{exact:true}).fill('qa-long-password-only');
+  await page.getByLabel('确认密码',{exact:true}).fill('qa-long-password-only');
+  await page.getByRole('button',{name:'创建法庭',exact:true}).click();
+  await page.getByRole('heading',{name:'法庭总览',exact:true}).waitFor();
+  await page.screenshot({path:path.join(out,'empty-desktop.png'),fullPage:true});
+  await page.locator('nav a[href="#members"]').click();
+  await page.getByRole('heading',{name:'朋友与账号',exact:true}).waitFor();
+  for(const name of ['朋友甲','朋友乙']){
+    await page.getByRole('button',{name:'添加朋友',exact:true}).click();
+    await page.locator('dialog').getByLabel('朋友称呼',{exact:true}).fill(name);
+    await page.locator('dialog').getByRole('button',{name:'添加朋友',exact:true}).click();
+    await page.locator('dialog').waitFor({state:'hidden'});
+    await page.getByRole('heading',{name,exact:true}).waitFor();
+  }
+  for(const [index,id]of [[1,'101'],[2,'102'],[3,'103']]){
+    await page.getByRole('button',{name:'登记账号',exact:true}).click();
+    await page.locator('#account-owner').selectOption(String(index));
+    await page.getByLabel('Broken Arrow 玩家 ID',{exact:true}).fill(id);
+    await page.getByLabel('账号备注',{exact:true}).fill(`Account ${id}`);
+    await page.locator('dialog').getByRole('button',{name:'登记账号',exact:true}).click();
+    await page.locator('dialog').waitFor({state:'hidden'});
+    await page.getByText(`Account ${id}`,{exact:true}).waitFor();
+  }
+  for(let i=0;i<12;i++){
+    const raw=rawMatch([101,102,103,104],{EndTime:Math.floor(Date.now()/1000)-i*86400,MapId:[3,5,12,22][i%4],Type:0});
+    if(i%3===0)raw.Data['103'].TeamId=1;
+    app.store.ingest(String(800+i),raw);
+    app.store.saveDetail(String(800+i),detailFor(raw));
+  }
+  app.store.ingest('999',rawMatch([101,201,202,203],{Type:0}));
+  app.store.ingest('990',rawMatch(undefined,{Type:1}));
+  app.store.ingest('991',rawMatch(undefined,{Type:3}));
+  app.store.run('INSERT INTO unit_catalogue(unit_id,data_json,updated_at) VALUES(?,?,?)','238',JSON.stringify({id:238,hudName:'T-90M',name:'Tank'}),new Date().toISOString());
+  await page.locator('nav a[href="#dashboard"]').click();
+  await page.getByRole('heading',{name:'法庭总览',exact:true}).waitFor();
+  await page.locator('#activity-chart').waitFor();
+  assert.equal(await page.getByLabel('地图',{exact:true}).getByRole('option',{name:'Airport',exact:true}).count(),1);
+  assert.equal(await page.getByLabel('地图',{exact:true}).getByRole('option',{name:'Ignalina Powerplant',exact:true}).count(),1);
+  await page.getByLabel('地图',{exact:true}).selectOption('22');
+  await page.waitForFunction(()=>document.querySelectorAll('.kpi-value')[0]?.textContent.trim()==='3');
+  assert.equal(await page.locator('tbody tr').first().locator('.table-title').innerText(),'Ignalina Powerplant');
+  await page.getByLabel('地图',{exact:true}).selectOption('');
+  await page.waitForFunction(()=>document.querySelectorAll('.kpi-value')[0]?.textContent.trim()==='12');
+  await page.waitForTimeout(5100);
+  const nonblank=await page.locator('#activity-chart').evaluate((canvas)=>{const p=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;let count=0;for(let i=0;i<p.length;i+=4)if(p[i]===138&&p[i+1]===213&&p[i+2]===172&&p[i+3]>0)count++;return count;});
+  assert(nonblank>100,'Activity chart must contain real plotted bars');
+  await page.screenshot({path:path.join(out,'dashboard-desktop.png'),fullPage:true});
+  await page.locator('nav a[href="#matches"]').click();await page.getByRole('heading',{name:'对局档案',exact:true}).waitFor();
+  assert.equal(await page.getByLabel('游戏模式',{exact:true}).inputValue(),'0');
+  assert.equal(await page.locator('tbody tr').count(),12);
+  await page.getByLabel('游戏模式',{exact:true}).selectOption('');
+  await page.waitForFunction(()=>document.querySelectorAll('tbody tr').length===14);
+  await page.getByRole('button',{name:'清除筛选',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('tbody tr').length===12);
+  assert.equal(await page.getByLabel('游戏模式',{exact:true}).inputValue(),'0');
+  await page.reload();await page.getByRole('heading',{name:'对局档案',exact:true}).waitFor();
+  assert.equal(await page.getByLabel('游戏模式',{exact:true}).inputValue(),'0');
+  await page.waitForFunction(()=>document.querySelectorAll('tbody tr').length===12);
+  await page.getByLabel('包含候选记录',{exact:true}).check();
+  await page.waitForFunction(()=>document.querySelectorAll('tbody tr').length===13);
+  await page.getByLabel('包含候选记录',{exact:true}).uncheck();
+  await page.waitForFunction(()=>document.querySelectorAll('tbody tr').length===12);
+  await page.screenshot({path:path.join(out,'matches-desktop.png'),fullPage:true});
+  await page.locator('a[href="#match/800"]').first().click();
+  await page.getByRole('heading',{name:'对局 #800',exact:true}).waitFor();
+  await page.screenshot({path:path.join(out,'detail-desktop.png'),fullPage:true});
+  await page.getByRole('button',{name:'单位与时间轴',exact:true}).click();
+  assert.equal(await page.locator('.timeline-row').count(),1);
+  await page.locator('#timeline-player').selectOption('*');
+  assert.equal(await page.locator('.timeline-row').count(),4);
+  await page.screenshot({path:path.join(out,'units-desktop.png'),fullPage:true});
+  await page.getByRole('button',{name:'玩家对比',exact:true}).click();
+  await page.locator('#compare-b').selectOption('103');assert.equal(await page.locator('.comparison-row').count(),11);
+  await page.getByRole('button',{name:'原始档案',exact:true}).click();
+  await page.locator('.json-node summary').first().click();await page.locator('.json-row').first().waitFor();
+  await page.locator('nav a[href="#analytics"]').click();await page.getByRole('heading',{name:'开黑分析',exact:true}).waitFor();
+  await page.getByRole('columnheader',{name:'场均摧毁分',exact:true}).waitFor();
+  await page.getByRole('columnheader',{name:'场均损失分',exact:true}).waitFor();
+  await page.getByRole('columnheader',{name:'场均占点',exact:true}).waitFor();
+  await page.getByRole('columnheader',{name:'场均友伤',exact:true}).waitFor();
+  await page.screenshot({path:path.join(out,'averages-desktop.png'),fullPage:true});
+  await page.getByRole('button',{name:'单位表现',exact:true}).click();await page.locator('.table-title').filter({hasText:'T-90M'}).waitFor();
+  await page.screenshot({path:path.join(out,'analytics-desktop.png'),fullPage:true});
+  await page.locator('nav a[href="#sync"]').click();await page.getByRole('heading',{name:'数据管理',exact:true}).waitFor();
+  const download=page.waitForEvent('download');await page.getByRole('button',{name:'导出完整档案',exact:true}).click();assert((await download).suggestedFilename().endsWith('.json'));
+  await page.getByRole('button',{name:'按 ID 补抓',exact:true}).click();
+  await page.getByLabel('对局 ID 或 BATrace 链接',{exact:true}).fill('https://dash.batrace.top/match/700');
+  await page.getByRole('button',{name:'抓取并归档',exact:true}).click();await page.locator('dialog').waitFor({state:'hidden'});
+  assert.equal(app.store.get("SELECT detail_state FROM matches WHERE id='700'").detail_state,'complete');
+  await page.screenshot({path:path.join(out,'sync-desktop.png'),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  for(const view of ['dashboard','members','matches','sync']){
+    await page.locator(`nav a[href="#${view}"]`).click();await page.getByRole('heading',{name:({dashboard:'法庭总览',members:'朋友与账号',matches:'对局档案',sync:'数据管理'})[view],exact:true}).waitFor();
+    const widths=await page.evaluate(()=>({document:document.documentElement.scrollWidth,viewport:innerWidth}));assert(widths.document<=widths.viewport+1,`Mobile document overflows on ${view}: ${JSON.stringify(widths)}`);
+    await page.screenshot({path:path.join(out,`${view}-mobile.png`),fullPage:true});
+  }
+  app.store.run("INSERT INTO account_history_gaps VALUES(1,'12345','before','before')");
+  app.store.run('UPDATE accounts SET history_complete=1 WHERE id=1');
+  app.store.run("UPDATE accounts SET last_error='连接数据源失败：test timeout' WHERE id=2");
+  await page.locator('nav a[href="#members"]').click();await page.getByRole('heading',{name:'朋友与账号',exact:true}).waitFor();
+  await page.getByText('已同步 · 历史有缺失',{exact:true}).waitFor();
+  assert.match(await page.locator('.account-row').nth(0).locator('[title]').first().getAttribute('title'),/1 条历史比赛数据/);
+  await page.getByText('同步异常',{exact:true}).waitFor();
+  assert.match(await page.locator('.account-row').nth(1).locator('[title]').first().getAttribute('title'),/test timeout/);
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  await page.screenshot({path:path.join(out,'history-gaps-members-mobile.png'),fullPage:true});
+  await page.locator('nav a[href="#sync"]').click();await page.getByText('历史索引已扫描 · 1 条暂缺',{exact:true}).waitFor();
+  await page.screenshot({path:path.join(out,'history-gaps-sync-mobile.png'),fullPage:true});
+  await page.locator('nav a[href="#members"]').click();await page.getByRole('heading',{name:'朋友与账号',exact:true}).waitFor();
+  await page.getByRole('button',{name:'登记账号',exact:true}).click();await page.screenshot({path:path.join(out,'account-modal-mobile.png'),fullPage:true});await page.getByRole('button',{name:'关闭',exact:true}).click();
+  assert.deepEqual(errors,[]);
+  console.log(JSON.stringify({ok:true,checks:['registration','friend management','multi-account registration','qualified/candidate filtering','full detail','unit timeline','comparison','raw fields','analytics','export','desktop/mobile layout','nonblank activity canvas'],screenshots:out,sourceDataDirectory:directory},null,2));
+}finally{await browser?.close();await app.close();}
