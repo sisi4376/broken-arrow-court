@@ -66,7 +66,10 @@ try{
   await page.locator('[data-action="analytics-tab"][data-value="members"]').click();await page.locator('[data-sort-table="friends"] th[aria-sort="ascending"]').waitFor();
   await page.locator('#main a[href="#friend/1"]').first().click();
   await page.getByRole('heading',{name:'院长 · 详细分析',exact:true}).waitFor();
-  assert.equal(await page.locator('.insight-card').count(),6);assert.match(await page.locator('.insight-card').nth(1).textContent(),/M1A2 Abrams/);
+  assert.equal(await page.locator('.insight-card').count(),8);
+  assert.deepEqual(await page.locator('.profile-unit-highlights .insight-label').allTextContents(),['最多使用单位','伤害最高单位','击杀最多单位']);
+  assert.match(await page.locator('.profile-unit-highlights .insight-card').nth(0).textContent(),/M1A2 Abrams/);
+  assert.match(await page.locator('.profile-unit-highlights .insight-card').nth(0).textContent(),/累计部署/);
   await page.screenshot({path:path.join(out,'friend-overview-desktop.png'),fullPage:true});
   for(const tab of ['decks','teammates','maps','units','matches']){
     await page.locator(`[data-action="friend-tab"][data-value="${tab}"]`).click();await page.locator('tbody tr').first().waitFor();
@@ -80,7 +83,7 @@ try{
   await page.keyboard.press('Space');assert.match(await page.locator('[data-sort-table="friend-teammates"] tbody tr').first().textContent(),/朋友甲/);
   assert.match(await page.locator('tbody tr').filter({hasText:'朋友乙'}).textContent(),/12/);
   await page.locator('#analysis-min').selectOption('20');await page.locator('#analysis-min').waitFor();await page.waitForFunction(()=>document.querySelector('#analysis-min')?.value==='20'&&!document.querySelector('.loading-page'));
-  await page.locator('[data-action="friend-tab"][data-value="overview"]').click();assert.match(await page.locator('.insight-card').nth(3).textContent(),/样本不足/);
+  await page.locator('[data-action="friend-tab"][data-value="overview"]').click();assert.match(await page.locator('.insight-card').filter({hasText:'胜率最高的搭档'}).textContent(),/样本不足/);
   await page.locator('#friend-switch').selectOption('4');await page.getByRole('heading',{name:'暂无战绩 · 详细分析',exact:true}).waitFor();
   await page.locator('#friend-switch').selectOption('1');await page.getByRole('heading',{name:'院长 · 详细分析',exact:true}).waitFor();
   await page.setViewportSize({width:390,height:844});
@@ -93,7 +96,7 @@ try{
   await page.locator('[data-action="edit-deck"][data-id="101"]').click();await page.locator('#deck-spec1').selectOption('3');await page.locator('#deck-spec2').selectOption('5');
   await page.getByRole('button',{name:'确认组合',exact:true}).click();await page.locator('dialog').waitFor({state:'hidden'});
   assert.equal(app.store.get("SELECT spec2 FROM match_decks WHERE player_id='101'").spec2,5);
-  await page.locator('[data-action="edit-deck"][data-id="101"]').click();await page.getByRole('button',{name:'清除人工确认，恢复推定',exact:true}).click();await page.locator('dialog').waitFor({state:'hidden'});
+  await page.locator('[data-action="edit-deck"][data-id="101"]').click();await page.getByRole('button',{name:'清除人工确认，恢复自动识别',exact:true}).click();await page.locator('dialog').waitFor({state:'hidden'});
   assert.equal(app.store.get('SELECT COUNT(*) n FROM match_decks').n,0);
   await page.locator('nav a[href="#analytics"]').click();await page.getByRole('heading',{name:'开黑分析',exact:true}).waitFor();
   for(const tab of ['decks','maps','units']){

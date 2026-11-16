@@ -6,12 +6,24 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { Store, now, digest } from './db.mjs';
-import { SourceClient } from './source.mjs';
+import { createSource,sourceProvider,SOURCE_PROVIDERS } from './source-provider.mjs';
+import { requestStatistics } from './request-statistics.mjs';
+import { localStorage } from './local-storage.mjs';
 import { SyncEngine } from './sync.mjs';
+import { syncSchedule } from './sync-schedule.mjs';
+import { accountGameCount, accountQueryState, queryQuietEnabled } from './account-query-policy.mjs';
+import { requestMonitor,requestBases,requestPage } from './request-monitor.mjs';
+import { localProfile } from './profile-stats.mjs';
 import { Publication } from './publication.mjs';
+import { CloudBackup } from './cloud-backup.mjs';
+import { UpdateRelay } from './update-relay.mjs';
+import { NtfyUpdateRelay } from './ntfy-update-relay.mjs';
 import { serveStatic } from './static-host.mjs';
 import { numericId, normalizeMatch, extractImport, extractProfile, extractMatchDetail, parseMatchReference, mapName, TITLE } from './domain.mjs';
 import { dashboard, listMatches, matchDetail, memberStats, unitStats, supplyAnalysis } from './queries.mjs';
+import { zhanfanAnalysis, zhanfanComparison } from './zhanfan.mjs';
+import { courtReview } from './court-review.mjs';
+import { stackedTrial } from './court-stacked-trial.mjs';
 import { overallAnalysis, friendAnalysis, deckModel, identifyDeck, specName } from './analysis.mjs';
 
 const scrypt = promisify(scryptCallback);
@@ -43,12 +55,26 @@ async function readBody(req, max = 1024 * 1024) {
 
 export function createApplication({ directory = process.env.DATA_DIR || path.join(ROOT, 'data'), sourceOptions, startScheduler = true, shutdownToken = null, staticOutputDirectory } = {}) {
   const store = new Store(directory);
-  const source = new SourceClient(store, sourceOptions);
+  let source = createSource(store, sourceOptions);
   const engine = new SyncEngine(store, source);
   const staticDirectory = path.resolve(staticOutputDirectory || process.env.STATIC_OUTPUT_DIR || path.join(ROOT, 'site'));
-  const publication = new Publication(store, { directory: staticDirectory, remote: process.env.PUBLISH_GIT_REMOTE || '', branch: process.env.PUBLISH_GIT_BRANCH || 'main', intervalMinutes: Number(process.env.PUBLISH_MIN_INTERVAL_MINUTES || 120), enabled: process.env.STATIC_EXPORT_ENABLED !== '0' });
+  const publication = new Publication(store, { directory: staticDirectory, remote: process.env.PUBLISH_GIT_REMOTE || '', branch: process.env.PUBLISH_GIT_BRANCH || 'main', intervalMinutes: Number(process.env.PUBLISH_MIN_INTERVAL_MINUTES || 120), enabled: process.env.STATIC_EXPORT_ENABLED !== '0', isSyncActive: () => Boolean(engine.active) });
+  engine.onIdle = () => publication.tick();
+  const updateRelay = process.env.UPDATE_NTFY_TOPIC
+    ? new NtfyUpdateRelay(store, engine, publication, { url: process.env.UPDATE_NTFY_URL || 'https://ntfy.sh', topic: process.env.UPDATE_NTFY_TOPIC })
+    : new UpdateRelay(store, engine, publication, { url: process.env.UPDATE_RELAY_URL || '', token: process.env.UPDATE_RELAY_TOKEN || '' });
+  const cloudBackup = new CloudBackup(store, { repository: process.env.CLOUD_BACKUP_REPOSITORY || '', intervalHours: Number(process.env.CLOUD_BACKUP_INTERVAL_HOURS || 24), retention: Number(process.env.CLOUD_BACKUP_RETENTION || 14), proxy: process.env.CLOUD_BACKUP_PROXY || '' });
   const limits = new Map();
   let onShutdown = null;
+  let storageCache=null;
+  function changeSource(provider){
+    assert(Object.hasOwn(SOURCE_PROVIDERS,provider),400,'请选择 BATrace 或官方上游');
+    assert(!engine.active&&!source.inflight.size&&!source.reports?.inflight.size,409,'当前有数据请求进行中，请等待结束再切换');
+    const previous=sourceProvider(store);store.setting('source_provider',provider);
+    try{source=createSource(store,sourceOptions);engine.source=source;engine.pending=null;}
+    catch(error){store.setting('source_provider',previous);throw error;}
+    store.audit(null,'source-provider-update',{provider});return {provider,label:SOURCE_PROVIDERS[provider].label};
+  }
   function rate(req, label, limit = 12) {
     const key = `${req.socket.remoteAddress}:${label}`;
     const entry = limits.get(key) ?? { count: 0, until: Date.now() + 900000 };
@@ -88,14 +114,35 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
     try {
       const url = new URL(req.url, 'http://localhost');
       const route = url.pathname;
+      if (startScheduler && ['POST','PATCH','PUT','DELETE'].includes(req.method) &&
+          /^\/api\/(?:register|members(?:\/\d+)?|accounts(?:\/\d+)?|import(?:\/match)?|settings|matches\/\d+\/players\/\d+\/deck)$/.test(route)) {
+        res.once('finish', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) publication.tick({ dataChanged:true }).catch(() => {});
+        });
+      }
       if (route === '/readonly') { res.writeHead(302, { Location: '/readonly/' }); res.end(); return; }
       if (route.startsWith('/readonly/')) return await serveStatic(req, res, staticDirectory, route.slice('/readonly/'.length));
       if (!route.startsWith('/api/')) {
         assert(['GET','HEAD'].includes(req.method), 405, '不支持此请求方法');
-        const files = { '/': ['index.html','text/html'], '/app.js': ['app.js','text/javascript'], '/analysis.js': ['analysis.js','text/javascript'], '/performance.js': ['performance.js','text/javascript'], '/table-sort.js': ['table-sort.js','text/javascript'], '/style.css': ['style.css','text/css'], '/icons.js': ['icons.js','text/javascript'], '/favicon.svg': ['favicon.svg','image/svg+xml'] };
+        const files = { '/': ['index.html','text/html'], '/app.js': ['app.js','text/javascript'], '/analysis.js': ['analysis.js','text/javascript'], '/performance.js': ['performance.js','text/javascript'], '/zhanfan.js': ['zhanfan.js','text/javascript'], '/table-sort.js': ['table-sort.js','text/javascript'], '/style.css': ['style.css','text/css'], '/icons.js': ['icons.js','text/javascript'], '/favicon.svg': ['favicon.svg','image/svg+xml'] };
+        files['/court-ui.js'] = ['court-ui.js','text/javascript'];
+        files['/court-ui.css'] = ['court-ui.css','text/css'];
+        files['/match-player.js'] = ['match-player.js','text/javascript'];
+        files['/medals.js'] = ['medals.js','text/javascript'];
+        files['/match-version.js'] = ['match-version.js','text/javascript'];
+        files['/update-request.js'] = ['update-request.js','text/javascript'];
+        files['/ntfy-transport.js'] = ['ntfy-transport.js','text/javascript'];
+        const unitIcon=route.match(/^\/unit-icon-([A-Za-z0-9_-]{1,160})\.png$/);
+        if(unitIcon)files[route]=['unit-icons/'+unitIcon[1]+'.png','image/png'];
+        const medalIcon=route.match(/^\/medal-icon-([A-Za-z0-9_-]{1,160})\.png$/);
+        if(medalIcon)files[route]=['medal-icons/'+medalIcon[1]+'.png','image/png'];
+        if(['/trial.html','/trial.js','/trial.css'].includes(route)){
+          assert(session(req)?.role==='admin',403,'试算页面仅供本地后台管理员访问');
+          files[route]=[route.slice(1),route.endsWith('.html')?'text/html':route.endsWith('.css')?'text/css':'text/javascript'];
+        }
         const file = files[route]; assert(file, 404, '页面不存在');
-        const body = await readFile(path.join(ROOT, 'public', file[0]));
-        res.writeHead(200, { 'Content-Type': `${file[1]}; charset=utf-8` }); res.end(req.method === 'HEAD' ? undefined : body); return;
+        let body;try{body=await readFile(path.join(ROOT, 'public', file[0]));}catch(e){if(e.code==='ENOENT')throw new HttpError(404,'文件不存在');throw e;}
+        res.writeHead(200, { 'Content-Type': file[1]==='image/png'?file[1]:`${file[1]}; charset=utf-8` }); res.end(req.method === 'HEAD' ? undefined : body); return;
       }
       if (!['GET','HEAD'].includes(req.method)) {
         const origin = req.headers.origin;
@@ -104,13 +151,29 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
         assert(req.headers['sec-fetch-site'] !== 'cross-site', 403, '不允许跨站请求');
       }
       if (route === '/api/health') return json(res, { ok: true, title: TITLE });
-      if (route === '/api/service/stop' && req.method === 'POST') {
+      if (route === '/api/service/publication' && ['GET','POST'].includes(req.method)) {
         const remote = req.socket.remoteAddress;
         assert(['127.0.0.1','::1','::ffff:127.0.0.1'].includes(remote) && shutdownToken && req.headers['x-service-token'] === shutdownToken, 403, '无效的服务管理请求');
+        if (req.method === 'POST') {
+          assert(publication.remote, 400, '尚未配置发布仓库');
+          publication.tick({ forcePush:true }).catch(() => {});
+        }
+        return json(res, await publication.status(), req.method === 'POST' ? 202 : 200);
+      }
+      if (['/api/service/stop','/api/service/sync','/api/service/source'].includes(route) && req.method === 'POST') {
+        const remote = req.socket.remoteAddress;
+        assert(['127.0.0.1','::1','::ffff:127.0.0.1'].includes(remote) && shutdownToken && req.headers['x-service-token'] === shutdownToken, 403, '无效的服务管理请求');
+        if(route==='/api/service/source'){const body=await readBody(req);return json(res,changeSource(body.provider));}
+        if(route==='/api/service/sync'){
+          const body=await readBody(req);assert(typeof body.enabled==='boolean',400,'自动同步必须为布尔值');
+          store.setting('sync_enabled',body.enabled);if(!body.enabled&&!engine.pendingManual)engine.pending=null;
+          store.audit(null,'sync-local',{sync_enabled:body.enabled});
+          return json(res,{sync_enabled:body.enabled});
+        }
         json(res, { ok: true }); setTimeout(() => onShutdown?.(), 100).unref(); return;
       }
       const user = session(req);
-      if (route === '/api/session' && req.method === 'GET') return json(res, { user, setup_required: !store.get('SELECT id FROM users LIMIT 1'), title: TITLE });
+      if (route === '/api/session' && req.method === 'GET') return json(res, { user, setup_required: !store.get('SELECT id FROM users LIMIT 1'), title: TITLE, ui: { court_mode: store.settings().court_mode === true } });
       if (route === '/api/invitation' && req.method === 'GET') {
         rate(req, 'invite-check', 60);
         const code = String(url.searchParams.get('code') ?? '').slice(0,100);
@@ -236,12 +299,13 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
       match = route.match(/^\/api\/accounts\/(\d+)\/profile$/);
       if (match && req.method === 'GET') {
         const account = store.get('SELECT * FROM accounts WHERE id=?', Number(match[1])); assert(account,404,'账号不存在');
-        const profile = store.get('SELECT * FROM profiles WHERE player_id=?', account.player_id);
-        return json(res, { account, data: profile ? JSON.parse(profile.data_json) : null, metadata: profile ? JSON.parse(profile.metadata_json) : null, updated_at: profile?.updated_at ?? null });
+        return json(res, localProfile(store,account));
       }
       if (route === '/api/dashboard' && req.method === 'GET') return json(res, dashboard(store,url.searchParams));
       if (route === '/api/analytics/members' && req.method === 'GET') return json(res, { members: memberStats(store,url.searchParams) });
       if (route === '/api/analytics/supply' && req.method === 'GET') return json(res, supplyAnalysis(store,url.searchParams));
+      if (route === '/api/analytics/zhanfan/trial' && req.method === 'GET') { admin(user); return json(res,stackedTrial(store,url.searchParams)); }
+      if (route === '/api/analytics/zhanfan' && req.method === 'GET') return json(res, (url.searchParams.get('court_cases')==='1'?courtReview:url.searchParams.get('court_compare')==='1'?zhanfanComparison:zhanfanAnalysis)(store,url.searchParams));
       if (route === '/api/analytics/units' && req.method === 'GET') return json(res, { units: unitStats(store,url.searchParams) });
       if (route === '/api/analytics/overview' && req.method === 'GET') return json(res, overallAnalysis(store,url.searchParams));
       match = route.match(/^\/api\/members\/(\d+)\/analysis$/);
@@ -272,25 +336,73 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
       }
       match = route.match(/^\/api\/matches\/(\d+)\/retry$/);
       if (match && req.method === 'POST') {
-        admin(user); const row = store.get('SELECT friend_count FROM matches WHERE id=?',match[1]); assert(row,404,'对局不存在'); assert(row.friend_count>=3,400,'此对局未达到三位朋友条件');
+        admin(user); const row = store.get('SELECT friend_count FROM matches WHERE id=?',match[1]); assert(row,404,'对局不存在'); assert(row.friend_count>=3||store.get('SELECT 1 FROM registered_participants WHERE match_id=? LIMIT 1',match[1]),400,'此对局没有活跃登记朋友参与');
         store.run("UPDATE matches SET detail_state='summary',detail_retry_at=NULL WHERE id=?",match[1]); engine.request(); return json(res,{ok:true});
+      }
+      if (route === '/api/source/requests' && req.method === 'GET') {
+        admin(user);
+        if(url.searchParams.has('page')||url.searchParams.has('page_size'))return json(res,requestPage(store,source.base,url.searchParams.get('page')??1,url.searchParams.get('page_size')??15));
+        const before=Number(url.searchParams.get('before')??Number.MAX_SAFE_INTEGER),limit=Number(url.searchParams.get('limit')??100);
+        assert(Number.isSafeInteger(before)&&before>0&&Number.isInteger(limit)&&limit>=1&&limit<=200,400,'请求记录分页参数无效');
+        const bases=requestBases(source.base),rows=store.all(`SELECT * FROM source_requests WHERE base IN (${bases.map(()=>'?').join(',')}) AND id<? ORDER BY id DESC LIMIT ?`,...bases,before,limit);
+        return json(res,{rows,next_before:rows.length===limit?rows.at(-1).id:null});
+      }
+      if(route==='/api/source/statistics'&&req.method==='GET'){
+        admin(user);const query=Object.fromEntries(url.searchParams);const result=requestStatistics(store,query);
+        if(query.format==='csv'){
+          const keys=['date','new_matches','requests','recorded_requests','legacy_requests','supplement_requests','bytes','unknown_bytes_requests','errors','pending','runs','imported','changed'];
+          const all=requestStatistics(store,{...query,page:1,page_size:1000});assert(all.total_rows<=1000,400,'导出请缩小日期范围或按月、年分组，最多 1000 行');
+          const cell=v=>'"'+String(v??'').replaceAll('"','""')+'"';
+          const csv='\ufeff'+[keys.join(','),...all.rows.map(row=>keys.map(key=>cell(row[key])).join(','))].join('\r\n');
+          res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="request-statistics.csv"'});res.end(csv);return;
+        }return json(res,result);
+      }
+      if(route==='/api/source/provider'&&req.method==='POST'){admin(user);const body=await readBody(req);return json(res,changeSource(body.provider));}
+      if(route==='/api/local/storage'&&req.method==='GET'){
+        admin(user);if(!storageCache||storageCache.expires<Date.now())storageCache={expires:Date.now()+60000,value:localStorage(ROOT,{data:store.directory,site:staticDirectory})};
+        return json(res,await storageCache.value);
       }
       if (route === '/api/sync/status' && req.method === 'GET') {
         const s = store.settings();
+        s.court_mode = s.court_mode === true;
+        s.match_query_quiet_enabled = queryQuietEnabled(store);
+        s.sync_schedule = syncSchedule();
+        s.sync_minutes = s.sync_schedule.current_minutes;
+        s.source_provider=sourceProvider(store);s.source_providers=SOURCE_PROVIDERS;
+        if (user.role === 'admin') { s.cloud_backup = await cloudBackup.status(); s.publication = await publication.status(); }
         const stats = store.get("SELECT COUNT(*) AS candidates,COALESCE(SUM(friend_count>=3),0) AS qualified,COALESCE(SUM(friend_count>=3 AND detail_state='complete'),0) AS complete,COALESCE(SUM(friend_count>=3 AND detail_state='error'),0) AS detail_errors FROM matches");
         const databaseBytes = ['court.sqlite','court.sqlite-wal'].reduce((sum,name) => { try { return sum+statSync(path.join(store.directory,name)).size; } catch { return sum; } },0);
-        return json(res,{settings:s,active:engine.current,queued:engine.pending,blocked_until:source.blockedUntil> Date.now()?new Date(source.blockedUntil).toISOString():null,stats:{...stats,units:store.get('SELECT COUNT(*) AS n FROM unit_instances').n,snapshots:store.get('SELECT COUNT(*) AS n FROM source_snapshots').n,database_bytes:databaseBytes},accounts:listMembers().flatMap((m)=>m.accounts.map((a)=>({...a,member_name:m.name}))),runs:store.all('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 20'),events:store.all('SELECT * FROM sync_events ORDER BY id DESC LIMIT 100')});
+        return json(res,{settings:s,request_monitor:user.role==='admin'?requestMonitor(store,source.base):null,active:engine.current,queued:engine.pending,blocked_until:source.blockedUntil> Date.now()?new Date(source.blockedUntil).toISOString():null,stats:{...stats,units:store.get('SELECT COUNT(*) AS n FROM unit_instances').n,snapshots:store.get('SELECT COUNT(*) AS n FROM source_snapshots').n,database_bytes:databaseBytes},accounts:listMembers().flatMap((m)=>m.accounts.map((a)=>({...a,member_name:m.name,query_games:accountGameCount(store,a),...accountQueryState(store,a.player_id)}))),runs:store.all('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 20'),events:store.all('SELECT * FROM sync_events ORDER BY id DESC LIMIT 100')});
+      }
+      if (route === '/api/publication/run' && req.method === 'POST') {
+        admin(user); await readBody(req); rate(req, 'publication', 6);
+        assert(publication.remote, 400, '尚未配置网页发布仓库，请先在 EXE 中完成部署');
+        const queued = Boolean(publication.active || engine.active);
+        store.audit(user.id, 'publication-request', {});
+        publication.tick({ forcePush: true }).catch(() => {});
+        return json(res, { ok: true, queued, message: queued ? '网页更新已排队' : '网页更新已开始' }, 202);
       }
       if (route === '/api/sync/run' && req.method === 'POST') {
-        admin(user); const body=await readBody(req); store.setting('sync_enabled',true);
+        admin(user); const body=await readBody(req);
         if (body.kind==='full') { source.blockedUntil = Math.max(source.blockedUntil,0); store.run('UPDATE accounts SET next_retry=NULL'); }
-        store.audit(user.id,'sync-request',{kind:body.kind}); return json(res,engine.request(body.kind==='full'?'full':'incremental'),202);
+        store.audit(user.id,'sync-request',{kind:body.kind}); return json(res,engine.request(body.kind==='full'?'full':'incremental',{manual:true}),202);
       }
       if (route === '/api/settings' && req.method === 'PATCH') {
         admin(user); const body=await readBody(req);
-        if (body.sync_minutes!==undefined) { assert(Number.isInteger(body.sync_minutes)&&body.sync_minutes>=5&&body.sync_minutes<=1440,400,'同步间隔需为 5 至 1440 分钟'); store.setting('sync_minutes',body.sync_minutes); }
+        assert(body.match_query_quiet_enabled===undefined||typeof body.match_query_quiet_enabled==='boolean',400,'查询静默开关必须为布尔值');
+        for(const [key,max] of [['minute',1000],['hour',10000],['day',100000]]){
+          const value=body[`request_limit_${key}`];
+          assert(value===undefined||(Number.isInteger(value)&&value>=1&&value<=max),400,`请求上限必须为 1 至 ${max} 的整数`);
+        }
+        if (body.court_mode !== undefined) {
+          assert(typeof body.court_mode === 'boolean',400,'开庭模式必须为布尔值');
+          store.setting('court_mode',body.court_mode);
+        }
+        assert(body.sync_minutes===undefined,400,'同步频率已改为北京时间分时调度，请刷新页面后保存设置');
         if (body.request_delay_ms!==undefined) { assert(Number.isInteger(body.request_delay_ms)&&body.request_delay_ms>=1000&&body.request_delay_ms<=60000,400,'请求间隔需为 1000 至 60000 毫秒'); store.setting('request_delay_ms',body.request_delay_ms); }
-        if (body.sync_enabled!==undefined) { store.setting('sync_enabled',!!body.sync_enabled); if(!body.sync_enabled) engine.pending=null; }
+        if (body.sync_enabled!==undefined) { store.setting('sync_enabled',!!body.sync_enabled); if(!body.sync_enabled&&!engine.pendingManual) engine.pending=null; }
+        if (body.match_query_quiet_enabled!==undefined) store.setting('match_query_quiet_enabled',body.match_query_quiet_enabled);
+        for(const key of ['minute','hour','day'])if(body[`request_limit_${key}`]!==undefined)store.setting(`request_limit_${key}`,body[`request_limit_${key}`]);
         store.audit(user.id,'settings-update',body); return json(res,{ok:true});
       }
       if (route === '/api/import/match' && req.method === 'POST') {
@@ -343,6 +455,12 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
         admin(user); const file=await store.backup(); store.audit(user.id,'database-backup',{});
         res.writeHead(200,{'Content-Type':'application/vnd.sqlite3','Content-Disposition':`attachment; filename="${path.basename(file)}"`});createReadStream(file).pipe(res);return;
       }
+      if (route === '/api/backup/cloud' && req.method === 'POST') {
+        admin(user); rate(req, 'cloud-backup', 3);
+        assert(cloudBackup.repository, 400, '尚未配置私有备份仓库');
+        cloudBackup.tick({ force: true }).catch(() => {});
+        return json(res, { ok: true, message: '私有云备份已安排，请在数据管理查看结果' }, 202);
+      }
       assert(false,404,'接口不存在');
     } catch(error) {
       if(res.headersSent){res.end();return;}
@@ -353,8 +471,8 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
   }
   const server=http.createServer(handler);
   server.requestTimeout=120000;server.headersTimeout=30000;
-  if(startScheduler){engine.start();publication.start();}
-  return {server,store,source,engine,publication,staticDirectory,setShutdown(fn){onShutdown=fn;},async close(){await publication.stop();await engine.stop();await new Promise((resolve)=>server.close(resolve));store.close();}};
+  if(startScheduler){engine.start();publication.start();cloudBackup.start();updateRelay.start();}
+  return {server,store,get source(){return source;},engine,publication,cloudBackup,updateRelay,staticDirectory,setShutdown(fn){onShutdown=fn;},async close(){await updateRelay.stop();await publication.stop();await engine.stop();await cloudBackup.stop();await new Promise((resolve)=>server.close(resolve));store.close();}};
 }
 
 async function main() {

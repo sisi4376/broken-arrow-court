@@ -1,0 +1,15 @@
+name = "court-update-relay"
+main = "worker.mjs"
+compatibility_date = "2026-10-01"
+
+[triggers]
+crons = ["0 0 * * *"]
+
+[vars]
+# Exact public website origin; GitHub Pages repository path is not part of origin.
+SITE_ORIGIN = "https://your-name.github.io"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "court-update-requests"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"

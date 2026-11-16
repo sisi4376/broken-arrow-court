@@ -15,7 +15,12 @@ site/
 *.key
 node_modules/
 test-results/
+/reports/
 *.log
 .DS_Store
 .desktop/
-/BrokenArrowCourt.exe
+/BrokenArrowCourt*.exe
+# Cloudflare development state and local secret files.
+.wrangler/
+.dev.vars
+.dev.vars.*

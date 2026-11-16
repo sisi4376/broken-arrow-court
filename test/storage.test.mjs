@@ -1,8 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import {gunzipSync} from 'node:zlib';
 import { testStore,member,rawMatch,detailFor } from './helpers.mjs';
 import { dashboard,memberStats,listMatches,matchDetail } from '../src/queries.mjs';
+
+test('all-match party filter includes solo and pair games while the default and same-team gates stay intact',t=>{
+  const s=testStore(t);member(s,'A',[101]);member(s,'B',[102]);member(s,'C',[103]);
+  for(const[id,players]of [['800',[101,201,202,203]],['801',[101,102,201,202]],['802',[101,102,201,103]],['803',[101,102,103,201]],['804',[201,202,203,204]]]){
+    s.ingest(id,rawMatch(players,{Type:0,MapId:id==='800'?12:4}));
+  }
+  const matches=query=>listMatches(s,new URLSearchParams(query)).total;
+  assert.equal(matches(''),2);assert.equal(matches('team=same'),1);assert.equal(matches('team=all'),4);
+  assert.equal(matches('team=all&mode=1'),0);assert.equal(matches('team=all&map=12'),1);
+  assert.equal(matches('team=all&member=3'),2);assert.equal(matches('team=all&q=800'),1);
+  assert.equal(matches('team=all&from=2099-01-01'),0);assert.equal(matches('team=invalid'),2);
+  assert.equal(dashboard(s,new URLSearchParams('team=all')).overview.matches,4);
+  assert.equal(memberStats(s,new URLSearchParams('team=all')).find(m=>m.member_id===1).matches,4);
+  assert.equal(memberStats(s).find(m=>m.member_id===1).matches,2);
+});
 
 test('three accounts of one person never qualify as three friends',t=>{
   const s=testStore(t);member(s,'One',[101,102,103]);s.ingest('800',rawMatch());
@@ -36,14 +52,40 @@ test('mode migration restores omitted normal modes, preserves unknown imports, a
   const s=testStore(t);member(s,'A',[101]);member(s,'B',[102]);member(s,'C',[103]);
   const normal=rawMatch();delete normal.Type;s.ingest('800',normal);s.ingest('801',rawMatch());s.ingest('802',rawMatch(undefined,{Type:3}));
   s.ingest('803',{players:[{id:101},{id:102},{id:103}]});
-  s.run("UPDATE matches SET mode=NULL WHERE id='800'");s.db.exec('DROP TABLE match_decks; DROP TABLE analysis_catalogue; PRAGMA user_version=2');s.migrate();
+  s.run("UPDATE matches SET mode=NULL WHERE id='800'");s.db.exec('DROP TABLE match_decks; DROP TABLE analysis_catalogue; DROP TABLE source_requests; DROP TABLE source_request_blocks; DROP TABLE request_history_evidence; PRAGMA user_version=2');s.migrate();
   assert.equal(s.get("SELECT mode FROM matches WHERE id='800'").mode,'0');
   assert.equal(s.get("SELECT mode FROM matches WHERE id='803'").mode,null);
-  assert.equal(s.get('PRAGMA user_version').user_version,4);
+  assert.equal(s.get('PRAGMA user_version').user_version,7);
   const f=new URLSearchParams('mode=0');assert.equal(dashboard(s,f).overview.matches,1);assert.equal(listMatches(s,f).total,1);assert(memberStats(s,f).every(r=>r.matches===1));
   assert.equal(listMatches(s,new URLSearchParams('mode=1')).total,1);assert.equal(listMatches(s,new URLSearchParams('mode=3')).total,1);
   assert.equal(listMatches(s,new URLSearchParams()).total,4);
   s.migrate();assert.equal(s.get('SELECT COUNT(*) n FROM matches').n,4);
+});
+
+test('old official unknown modes are repaired from preserved raw evidence without touching explicit types, units, or snapshots',t=>{
+  const s=testStore(t);member(s,'A',[101]);member(s,'B',[102]);member(s,'C',[103]);
+  const original=detailFor(rawMatch()).data;delete original.Type;
+  const mistaken={...original,Type:-1};
+  s.snapshot('/fights/fight_900.json',original);s.ingest('900',mistaken,1);s.saveDetail('900',{data:mistaken,metadata:{source:'official',mode_unknown:true}});
+  const explicit=detailFor(rawMatch(undefined,{Type:-1})).data;
+  s.snapshot('/fights/fight_901.json',explicit);s.ingest('901',explicit,1);s.saveDetail('901',{data:explicit,metadata:{source:'official',mode_unknown:true}});
+  s.ingest('902',rawMatch(undefined,{Type:1}),1);s.ingest('903',rawMatch(undefined,{Type:3}),1);
+  s.ingest('904',mistaken,1);s.saveDetail('904',{data:mistaken,metadata:{source:'other',mode_unknown:true}});
+  const network=s.get("SELECT content_hash,payload_gzip FROM source_snapshots WHERE source_key='/fights/fight_900.json'");
+  const units=s.get('SELECT COUNT(*) n FROM unit_instances').n;
+  s.migrate();
+  const fixed=s.get("SELECT * FROM matches WHERE id='900'"),detail=JSON.parse(fixed.detail_json);
+  assert.equal(fixed.mode,'0');assert.equal(JSON.parse(fixed.raw_json).Type,0);assert.equal(detail.data.Type,0);
+  assert.equal(detail.metadata.mode_unknown,false);assert.equal(detail.metadata.mode_defaulted,true);
+  assert.equal(s.ingest('900',JSON.parse(fixed.raw_json),1).changed,false);
+  assert.equal(s.get("SELECT mode FROM matches WHERE id='901'").mode,'-1');assert.equal(s.get("SELECT mode FROM matches WHERE id='902'").mode,'1');assert.equal(s.get("SELECT mode FROM matches WHERE id='903'").mode,'3');assert.equal(s.get("SELECT mode FROM matches WHERE id='904'").mode,'-1');
+  const unchanged=s.get("SELECT content_hash,payload_gzip FROM source_snapshots WHERE source_key='/fights/fight_900.json'");
+  assert.equal(unchanged.content_hash,network.content_hash);assert.deepEqual(unchanged.payload_gzip,network.payload_gzip);assert.equal(Object.hasOwn(JSON.parse(gunzipSync(unchanged.payload_gzip)),'Type'),false);
+  assert.equal(s.get('SELECT COUNT(*) n FROM unit_instances').n,units);
+  assert.equal(listMatches(s,new URLSearchParams('mode=0')).total,1);
+  assert.equal(listMatches(s,new URLSearchParams('mode=1')).total,1);
+  assert.equal(listMatches(s,new URLSearchParams('mode=3')).total,1);
+  const snapshots=s.get('SELECT COUNT(*) n FROM source_snapshots').n;s.migrate();assert.equal(s.get('SELECT COUNT(*) n FROM source_snapshots').n,snapshots);
 });
 test('at least three distinct friends in either team qualify, same team remains a separate filter',t=>{
   const s=testStore(t);member(s,'A',[101]);member(s,'B',[102]);member(s,'C',[104]);s.ingest('800',rawMatch());
@@ -95,7 +137,7 @@ test('online backup contains a consistent, restorable SQLite database',async t=>
 
 test('an existing version 1 archive gains history-gap tracking without losing accounts or matches',t=>{
   const s=testStore(t);member(s,'A',[101]);s.ingest('800',rawMatch());
-  s.db.exec('DROP TABLE account_history_gaps; DROP TABLE match_decks; DROP TABLE analysis_catalogue; PRAGMA user_version=1;');s.migrate();
+  s.db.exec('DROP TABLE account_history_gaps; DROP TABLE match_decks; DROP TABLE analysis_catalogue; DROP TABLE source_requests; DROP TABLE source_request_blocks; DROP TABLE request_history_evidence; PRAGMA user_version=1;');s.migrate();
   assert.equal(s.get('SELECT COUNT(*) AS n FROM accounts').n,1);
   assert.equal(s.get('SELECT COUNT(*) AS n FROM matches').n,1);
   assert.equal(s.get('SELECT COUNT(*) AS n FROM account_history_gaps').n,0);

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>叠加20分试算 · 断剑蘸饭审判法庭</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/trial.css">
+  <script src="/icons.js" defer></script>
+  <script src="/trial.js" type="module"></script>
+</head>
+<body>
+  <main class="trial-main">
+    <header class="trial-heading"><div><a class="trial-brand" href="/#analytics">断剑蘸饭审判法庭</a><h1>叠加20分对照 <span class="badge">v2已采用于正式v10</span></h1></div><div class="page-actions"><a class="trial-back" href="/#analytics">返回正式分析</a><button id="download" disabled><i data-lucide="download"></i>导出对照</button></div></header>
+    <form id="filters" class="trial-filters">
+      <label>模式<select name="mode"><option value="0">普通模式</option><option value="">全部模式</option><option value="1">排位赛</option><option value="3">遭遇战</option></select></label>
+      <label>地图<select id="map" name="map"><option value="">全部地图</option></select></label>
+      <label>朋友<select id="member" name="member"><option value="">全部朋友</option></select></label>
+      <label>队伍条件<select name="team"><option value="">同局 ≥ 3 人</option><option value="same">同队 ≥ 3 人</option></select></label>
+      <label>开始日期<input name="from" type="date"></label><label>结束日期<input name="to" type="date"></label>
+      <label>最低局数<input name="court_min_games" type="number" value="5" min="1" max="10000" required></label>
+      <button type="submit" id="refresh"><i data-lucide="refresh-cw"></i>重新试算</button>
+    </form>
+    <div id="status" role="status" aria-live="polite">读取本地档案…</div>
+    <div id="result" aria-busy="true"></div>
+  </main>
+</body>
+</html>

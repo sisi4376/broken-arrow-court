@@ -1,0 +1,51 @@
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createApplication, hashPassword } from '../src/server.mjs';
+import { member, rawMatch, detailFor } from '../test/helpers.mjs';
+import { quietMatchAccounts } from '../src/account-query-policy.mjs';
+
+const out=path.resolve('.cache/query-quiet-ui');mkdirSync(out,{recursive:true});
+const directory=mkdtempSync(path.join(out,'data-'));let sent=0;
+const app=createApplication({directory,startScheduler:false,staticOutputDirectory:path.join(directory,'site'),sourceOptions:{fetcher:async()=>{sent++;throw Error('UI test must not contact the upstream');}}});
+app.store.setting('sync_enabled',false);
+app.store.setting('match_query_quiet_enabled',true);
+member(app.store,'优先查询',[101]);member(app.store,'同场朋友',[102]);member(app.store,'其他朋友',[103]);
+app.store.run('INSERT INTO users(member_id,username,password_hash,role,created_at) VALUES(?,?,?,?,?)',1,'quiet-owner',await hashPassword('quiet-ui-test-password'),'admin',new Date().toISOString());
+for(const[id,games]of [[101,900],[102,500],[103,100]])app.store.saveProfile(String(id),{info:{id,name:`账号 ${id}`},statInfo:{fightsCountRt:games}});
+const raw=rawMatch([101,102,201],{EndTime:Math.floor(Date.now()/1000)-10*60});
+app.store.ingest('900',raw,1);app.store.saveDetail('900',detailFor(raw));quietMatchAccounts(app.store,'900',raw,'101');
+app.store.setting('match_query_quiet_enabled',false);
+await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));
+const url=`http://127.0.0.1:${app.server.address().port}`;
+const pw=await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);let browser;
+try{
+  try{browser=await pw.chromium.launch({headless:true,channel:'chrome'});}catch{browser=await pw.chromium.launch({headless:true});}
+  const context=await browser.newContext({viewport:{width:1440,height:1100}});
+  await context.route('**/*',route=>new URL(route.request().url()).origin===url?route.continue():route.abort());
+  const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(url);await page.getByLabel('登录名',{exact:true}).fill('quiet-owner');await page.getByLabel('密码',{exact:true}).fill('quiet-ui-test-password');await page.getByRole('button',{name:'登录',exact:true}).click();
+  await page.locator('nav a[href="#sync"]').click();
+  const panel=page.locator('section').filter({has:page.getByRole('heading',{name:'查询顺序与静默',exact:true})});
+  await panel.waitFor();await panel.scrollIntoViewIfNeeded();
+  assert.equal(await page.locator('#query-quiet-toggle').isChecked(),false);
+  assert.equal(await panel.getByText('查询静默',{exact:true}).count(),0);
+  await page.locator('#query-quiet-toggle').check();
+  await panel.getByText('查询静默',{exact:true}).first().waitFor();
+  const rows=await panel.locator('tbody tr').allTextContents();
+  assert(rows[0].includes('#101'));assert(rows[1].includes('#102'));assert(rows[2].includes('#103'));
+  assert.equal(rows.filter(r=>r.includes('查询静默')).length,2);assert(rows[2].includes('等待查询'));
+  const expectedTime=new Date(raw.EndTime*1000+45*60000).toLocaleString('zh-CN',{timeZone:'Asia/Hong_Kong',month:'2-digit',day:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+  assert(rows[0].includes(expectedTime));assert(rows[1].includes(expectedTime));
+  await panel.screenshot({path:path.join(out,'desktop.png')});
+  await page.setViewportSize({width:390,height:844});await panel.screenshot({path:path.join(out,'mobile.png')});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  const statusCell=await panel.locator('tbody tr').first().locator('td').last().boundingBox();assert(statusCell.x+statusCell.width<=391);
+  await page.locator('#query-quiet-toggle').uncheck();
+  await panel.getByText('查询静默',{exact:true}).first().waitFor({state:'hidden'});
+  assert.equal(app.store.settings().match_query_quiet_enabled,false);
+  assert.equal(sent,0);assert.equal(app.store.settings().sync_enabled,false);assert.deepEqual(errors,[]);
+  writeFileSync(path.join(out,'result.json'),JSON.stringify({rows,source_requests:sent,errors,automatic_sync:false},null,2));
+  console.log('Query policy UI verified: defaults off, switch on/off, persisted silence ignored when off, desktop/mobile, zero upstream requests.');
+}finally{await browser?.close();await app.close();}

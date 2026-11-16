@@ -7,10 +7,12 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -30,7 +32,20 @@ namespace BrokenArrowCourtDesktop
                 string adjacent = AppDomain.CurrentDomain.BaseDirectory;
                 string root = Bundle.IsProject(adjacent) ? adjacent : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BrokenArrowCourt", "application");
                 if (args.Length == 2 && args[0] == "--project") root = Path.GetFullPath(args[1]);
-                Application.Run(new ManagerForm(Path.GetFullPath(root), false));
+                root = Path.GetFullPath(root);
+                using (var instance = new ManagerInstance(root))
+                {
+                    if (!instance.IsPrimary)
+                    {
+                        if (!instance.ActivateExisting(5000)) MessageBox.Show("已有管理器正在启动或暂未响应。请稍候，或从系统托盘打开管理器；不会再创建重复窗口。", "断剑蘸饭审判法庭", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return 0;
+                    }
+                    using (var form = new ManagerForm(root, false))
+                    {
+                        instance.Listen(form);
+                        Application.Run(form);
+                    }
+                }
                 return 0;
             }
             catch (Exception e)
@@ -39,6 +54,48 @@ namespace BrokenArrowCourtDesktop
                 else MessageBox.Show(e.Message, "断剑蘸饭审判法庭", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 1;
             }
+        }
+    }
+
+    sealed class ManagerInstance : IDisposable
+    {
+        readonly Mutex mutex;
+        readonly EventWaitHandle activate, acknowledged;
+        RegisteredWaitHandle listener;
+        internal readonly bool IsPrimary;
+        [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(int processId);
+
+        internal ManagerInstance(string root)
+        {
+            string scope = Environment.UserDomainName + "\\" + Environment.UserName + "|" + Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant();
+            string key;
+            using (var bytes = new MemoryStream(Encoding.UTF8.GetBytes(scope))) key = "Local\\BrokenArrowCourt.Manager." + Bundle.Hash(bytes);
+            mutex = new Mutex(true, key, out IsPrimary);
+            activate = new EventWaitHandle(false, EventResetMode.AutoReset, key + ".activate");
+            acknowledged = new EventWaitHandle(false, EventResetMode.AutoReset, key + ".ack");
+        }
+        internal void Listen(ManagerForm form)
+        {
+            if (!IsPrimary) throw new InvalidOperationException("Only the primary manager can listen");
+            var handle = form.Handle;
+            listener = ThreadPool.RegisterWaitForSingleObject(activate, (s, expired) => {
+                try { form.BeginInvoke(new Action(() => { if (!form.IsDisposed) { form.ShowManager(); acknowledged.Set(); } })); }
+                catch (InvalidOperationException) { }
+            }, null, Timeout.Infinite, false);
+        }
+        internal bool ActivateExisting(int timeout)
+        {
+            // The new foreground process may grant focus only to this same executable.
+            string executable = Assembly.GetExecutingAssembly().Location;
+            foreach (var process in Process.GetProcessesByName(Process.GetCurrentProcess().ProcessName))
+            using (process) try { if (process.Id != Process.GetCurrentProcess().Id && string.Equals(process.MainModule.FileName, executable, StringComparison.OrdinalIgnoreCase)) AllowSetForegroundWindow(process.Id); } catch { }
+            acknowledged.Reset(); activate.Set(); return acknowledged.WaitOne(timeout);
+        }
+        public void Dispose()
+        {
+            if (listener != null) listener.Unregister(null);
+            activate.Dispose(); acknowledged.Dispose();
+            if (IsPrimary) mutex.ReleaseMutex(); mutex.Dispose();
         }
     }
 
@@ -157,10 +214,25 @@ namespace BrokenArrowCourtDesktop
 
     sealed class ManagerForm : Form
     {
-        string root; bool busy, refreshing, ready, testing;
+        string root; bool busy, refreshing, ready, testing, exitRequested, pendingFailure, trayTransition;
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window, int command);
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+        [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
+        NotifyIcon tray;
+        ContextMenuStrip trayMenu;
+        ToolStripMenuItem trayStart, trayStop, trayExit;
+        FormWindowState restoreState = FormWindowState.Normal;
         TextBox projectBox, repositoryBox, logBox;
-        Label serviceLabel, archiveLabel, publicationLabel, toolsLabel, currentLabel;
-        CheckBox consentBox, createBox, restartBox;
+        Label serviceLabel, archiveLabel, publicationLabel, toolsLabel, currentLabel, trafficLabel, scheduleLabel;
+        CheckBox consentBox, createBox, restartBox, autoSyncBox;
+        DataGridView requestHistory;
+        DataGridView storageHistory;
+        Label statisticsLabel, storageLabel;
+        DateTimePicker statisticsFrom, statisticsTo;
+        ComboBox statisticsGroup, statisticsSource, sourceChoice;
+        int statisticsPage = 1, statisticsPages = 1;
+        string queryFrom = "", queryTo = "", queryGroup = "day", queryProvider = "all";
+        bool sourceDirty, applyingSource;
         NumericUpDown interval;
         ProgressBar progress;
         readonly List<Button> operations = new List<Button>();
@@ -189,15 +261,58 @@ namespace BrokenArrowCourtDesktop
             var home = new TabPage("后台与状态") { AutoScroll = true, BackColor = Color.White, Padding = new Padding(14) };
             var publishing = new TabPage("网页发布") { AutoScroll = true, BackColor = Color.White, Padding = new Padding(14) };
             var logs = new TabPage("运行日志") { BackColor = Color.White, Padding = new Padding(10) };
-            tabs.TabPages.AddRange(new[] { home, publishing, logs }); layout.Controls.Add(tabs, 0, 2);
+            var traffic = new TabPage("请求统计") { BackColor = Color.White, Padding = new Padding(14) };
+            var storage = new TabPage("本地空间") { BackColor = Color.White, Padding = new Padding(14) };
+            tabs.TabPages.AddRange(new[] { home, publishing, logs, traffic, storage }); layout.Controls.Add(tabs, 0, 2);
             var homeLayout = Stack(home); var publishLayout = Stack(publishing);
             serviceLabel = Status("后台：待检查", 0); archiveLabel = Status("朋友 / 对局：待检查", 0); publicationLabel = Status("最后推送：待检查", 0);
             homeLayout.Controls.Add(serviceLabel); homeLayout.Controls.Add(archiveLabel); homeLayout.Controls.Add(publicationLabel);
+            trafficLabel = Status("今日请求 / 接收正文：待检查", 0); homeLayout.Controls.Add(trafficLabel);
+            var syncRow = Row();
+            autoSyncBox = new CheckBox { Text = "开启自动同步", AutoSize = true, Enabled = false, Margin = new Padding(0, 7, 16, 0) };
+            autoSyncBox.Click += async (s, e) => await ToggleAutoSync(); syncRow.Controls.Add(autoSyncBox);
+            syncRow.Controls.Add(Button("查看每日请求统计", () => SelectTab(3), false)); homeLayout.Controls.Add(syncRow);
+            scheduleLabel = Status("自动检查时间：待检查", 0); homeLayout.Controls.Add(scheduleLabel);
+            var sourceRow = Row(); sourceRow.Controls.Add(new Label { Text = "采集数据源", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
+            sourceChoice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 }; sourceChoice.Items.AddRange(new object[] { "BATrace", "官方上游（直连）" }); sourceChoice.SelectedIndex = 0;
+            sourceChoice.SelectedIndexChanged += (s, e) => { if (!applyingSource) sourceDirty = true; }; sourceRow.Controls.Add(sourceChoice);
+            sourceRow.Controls.Add(Button("切换数据源", async () => await ChangeSource()));
+            sourceRow.Controls.Add(Button("查看本地空间", async () => { SelectTab(4); await ScanStorage(); }, false)); homeLayout.Controls.Add(sourceRow);
+            homeLayout.Controls.Add(Status("官方源不回退到 BATrace；沿用本地单位目录，缺少的比赛模式保留未知。", 0));
+            var trafficLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+            trafficLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); trafficLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); trafficLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); traffic.Controls.Add(trafficLayout);
+            var queryRow = Row();
+            statisticsFrom = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd", ShowCheckBox = true, Checked = false, Font = new Font(Font.FontFamily, 8F), Width = 245, Value = DateTime.UtcNow.AddHours(8).Date };
+            statisticsTo = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy-MM-dd", ShowCheckBox = true, Checked = false, Font = new Font(Font.FontFamily, 8F), Width = 245, Value = DateTime.UtcNow.AddHours(8).Date };
+            statisticsFrom.Checked = statisticsTo.Checked = false;
+            statisticsGroup = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120, Font = new Font(Font.FontFamily, 8F) }; statisticsGroup.Items.AddRange(new object[] { "按日", "按月", "按年" }); statisticsGroup.SelectedIndex = 0;
+            statisticsSource = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180, Font = new Font(Font.FontFamily, 8F) }; statisticsSource.Items.AddRange(new object[] { "所有来源", "BATrace", "官方上游" }); statisticsSource.SelectedIndex = 0;
+            queryRow.Controls.Add(new Label { Text = "起止日期（不勾选即全部）", AutoSize = true }); queryRow.Controls.Add(statisticsFrom); queryRow.Controls.Add(statisticsTo); queryRow.Controls.Add(statisticsGroup); queryRow.Controls.Add(statisticsSource);
+            queryRow.Controls.Add(Button("查询", async () => await QueryStatistics(1, true))); queryRow.Controls.Add(Button("上一页", async () => await QueryStatistics(Math.Max(1, statisticsPage - 1), false))); queryRow.Controls.Add(Button("下一页", async () => await QueryStatistics(Math.Min(statisticsPages, statisticsPage + 1), false)));
+            trafficLayout.Controls.Add(queryRow, 0, 0);
+            var trafficHint = new Label { Text = "北京时间自然日 · 旧日志与补证是可核实下限，历史数据量未知。\n来源列依次为：逐次记录 / 旧日志 / 补证。正文为解压后大小；历史日按同步任务开始日期归属。", Font = new Font(Font.FontFamily, 8F), AutoSize = true, Dock = DockStyle.Fill, MaximumSize = new Size(980, 0), Margin = new Padding(0, 0, 0, 12) };
+            statisticsLabel = trafficHint; trafficLayout.Controls.Add(trafficHint, 0, 1);
+            traffic.SizeChanged += (s, e) => trafficHint.MaximumSize = new Size(Math.Max(250, traffic.ClientSize.Width - 35), 0);
+            requestHistory = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize, AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells, Font = new Font(Font.FontFamily, 8F), BackgroundColor = Color.White, BorderStyle = BorderStyle.None, SelectionMode = DataGridViewSelectionMode.FullRowSelect };
+            requestHistory.Columns.Add("date", "日期"); requestHistory.Columns.Add("requests", "请求数"); requestHistory.Columns.Add("origin", "逐次 / 旧日志 / 补证"); requestHistory.Columns.Add("bytes", "接收正文"); requestHistory.Columns.Add("runs", "全站轮数");
+            requestHistory.Columns[0].MinimumWidth = 180; requestHistory.Columns[0].AutoSizeMode = DataGridViewAutoSizeColumnMode.None; requestHistory.Columns[0].Width = 180;
+            requestHistory.Columns[2].MinimumWidth = 200;
+            requestHistory.DefaultCellStyle.Padding = new Padding(4, 3, 4, 3);
+            trafficLayout.Controls.Add(requestHistory, 0, 2);
+            var storageLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 }; storageLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); storageLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); storageLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); storage.Controls.Add(storageLayout);
+            var storageActions = Row(); storageActions.Controls.Add(Button("计算空间占用", async () => await ScanStorage())); storageLayout.Controls.Add(storageActions, 0, 0);
+            storageLabel = new Label { Text = "点击计算，查看项目、数据库、备份、缓存及磁盘可用空间。", AutoSize = true, Dock = DockStyle.Fill, MaximumSize = new Size(900, 0), Margin = new Padding(0, 6, 0, 12) }; storageLayout.Controls.Add(storageLabel, 0, 1);
+            storage.SizeChanged += (s, e) => storageLabel.MaximumSize = new Size(Math.Max(250, storage.ClientSize.Width - 35), 0);
+            storageHistory = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize, AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells, Font = new Font(Font.FontFamily, 8F), BackgroundColor = Color.White };
+            storageHistory.Columns.Add("name", "目录 / 文件"); storageHistory.Columns.Add("size", "大小"); storageHistory.Columns.Add("files", "文件数"); storageLayout.Controls.Add(storageHistory, 0, 2);
             var serviceRow = Row(); serviceRow.Controls.Add(Button("启动后台", async () => await Operation("启动后台", async () => await Node("scripts/service.mjs", "start"))));
             serviceRow.Controls.Add(Button("停止后台", async () => await Operation("停止后台", async () => await Node("scripts/service.mjs", "stop"))));
             serviceRow.Controls.Add(Button("重启后台", async () => await Operation("重启后台", Restart)));
             serviceRow.Controls.Add(Button("打开本机管理页", () => OpenUrl(Value("local_url", "http://127.0.0.1:4317")), false));
             serviceRow.Controls.Add(Button("打开只读预览", () => OpenUrl(Value("local_url", "http://127.0.0.1:4317") + "/readonly/"), false)); homeLayout.Controls.Add(serviceRow);
+            var courtRow = Row();
+            courtRow.Controls.Add(Button("开启开庭模式", async () => await Operation("开庭", async () => await Node("scripts/court-mode.mjs", "on"))));
+            courtRow.Controls.Add(Button("恢复常规界面", async () => await Operation("休庭", async () => await Node("scripts/court-mode.mjs", "off")))); homeLayout.Controls.Add(courtRow);
             toolsLabel = new Label { Text = "环境：待检查", AutoSize = true, Margin = new Padding(0, 12, 0, 10) }; homeLayout.Controls.Add(toolsLabel);
             var checks = Row(); checks.Controls.Add(Button("检查环境与部署", async () => await Operation("检查环境与部署", async () => await Refresh(true))));
             checks.Controls.Add(Button("登录 GitHub", Login)); checks.Controls.Add(Button("打开线上网页", () => { if (Value("public_url", "") == "") throw new Exception("尚未配置发布仓库"); OpenUrl(Value("public_url", "")); }, false)); homeLayout.Controls.Add(checks);
@@ -206,12 +321,12 @@ namespace BrokenArrowCourtDesktop
             publishLayout.Controls.Add(new Label { Text = "GitHub 仓库（用户名 / 仓库）", AutoSize = true, Margin = new Padding(0, 0, 0, 8) });
             repositoryBox = new TextBox { Dock = DockStyle.Top, Margin = new Padding(0, 0, 0, 12) }; publishLayout.Controls.Add(repositoryBox);
             createBox = new CheckBox { Text = "不存在时创建公开仓库", AutoSize = true, Margin = new Padding(0, 0, 0, 10) }; publishLayout.Controls.Add(createBox);
-            var optionRow = Row(); optionRow.Controls.Add(new Label { Text = "自动推送间隔（分钟）", AutoSize = true, Margin = new Padding(0, 8, 10, 0) });
+            var optionRow = Row(); optionRow.Controls.Add(new Label { Text = "其他更改推送间隔（分钟）", AutoSize = true, Margin = new Padding(0, 8, 10, 0) });
             interval = new NumericUpDown { Minimum = 5, Maximum = 10080, Value = 120, Width = 95, Margin = new Padding(0, 4, 10, 0) }; optionRow.Controls.Add(interval);
             optionRow.Controls.Add(Button("保存间隔", async () => await Operation("保存发布间隔", async () => { await Node("scripts/desktop-control.mjs", "interval", "--minutes", interval.Value.ToString()); Append("间隔已保存；重启后台后生效。"); })));
             publishLayout.Controls.Add(optionRow);
             restartBox = new CheckBox { Text = "部署成功后重启后台", AutoSize = true, Checked = true, Margin = new Padding(0, 8, 0, 12) }; publishLayout.Controls.Add(restartBox);
-            consentBox = new CheckBox { Text = "同意公开称呼、账号关联、对局与单位明细", AutoSize = true, Margin = new Padding(0, 0, 0, 14) }; publishLayout.Controls.Add(consentBox);
+            consentBox = new CheckBox { Text = "首次部署：同意公开称呼、账号关联、对局与单位明细", AutoSize = true, Margin = new Padding(0, 0, 0, 14) }; publishLayout.Controls.Add(consentBox);
             var publishRow = Row();
             var deploy = Button("一键部署 Pages", Deploy); Accent(deploy); publishRow.Controls.Add(deploy);
             var publish = Button("立即更新网页", Publish); Accent(publish); publishRow.Controls.Add(publish);
@@ -223,11 +338,97 @@ namespace BrokenArrowCourtDesktop
             var footer = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, Margin = new Padding(0, 8, 0, 0) }; footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
             currentLabel = new Label { Text = "准备中", Dock = DockStyle.Fill, AutoEllipsis = true, MinimumSize = new Size(0, Font.Height + 6) }; progress = new ProgressBar { Dock = DockStyle.Fill, Visible = false, Style = ProgressBarStyle.Marquee }; footer.Controls.Add(currentLabel, 0, 0); footer.Controls.Add(progress, 1, 0); layout.Controls.Add(footer, 0, 3);
             publishing.SizeChanged += (s, e) => consentBox.MaximumSize = new Size(Math.Max(250, publishing.ClientSize.Width - 50), 0);
-            home.SizeChanged += (s, e) => { toolsLabel.MaximumSize = new Size(Math.Max(250, home.ClientSize.Width - 50), 0); publicationLabel.MaximumSize = toolsLabel.MaximumSize; };
-            FormClosing += (s, e) => { if (busy) { e.Cancel = true; MessageBox.Show(this, "操作仍在执行，请等待结束后再关闭。", Text); } };
+            home.SizeChanged += (s, e) => { toolsLabel.MaximumSize = new Size(Math.Max(250, home.ClientSize.Width - 50), 0); publicationLabel.MaximumSize = toolsLabel.MaximumSize; trafficLabel.MaximumSize = toolsLabel.MaximumSize; scheduleLabel.MaximumSize = toolsLabel.MaximumSize; };
+            InitializeTray();
+            Resize += (s, e) => {
+                if (trayTransition) return;
+                if (WindowState == FormWindowState.Minimized) HideToTray();
+                else if (Visible) restoreState = WindowState;
+            };
             timer.Tick += async (s, e) => { if (!busy && ready) try { await Refresh(false); } catch (Exception error) { currentLabel.Text = error.Message; } };
             if (!testing) Shown += async (s, e) => await Initialize();
         }
+        void InitializeTray()
+        {
+            trayMenu = new ContextMenuStrip();
+            trayMenu.Items.Add("显示管理器", null, (s, e) => ShowManager());
+            trayMenu.Items.Add("打开本机管理页", null, (s, e) => { try { OpenUrl(Value("local_url", "http://127.0.0.1:4317")); } catch (Exception error) { Failure(error); } });
+            trayMenu.Items.Add(new ToolStripSeparator());
+            trayStart = new ToolStripMenuItem("启动后台", null, async (s, e) => await Operation("启动后台", async () => await Node("scripts/service.mjs", "start")));
+            trayStop = new ToolStripMenuItem("停止后台", null, async (s, e) => await Operation("停止后台", async () => await Node("scripts/service.mjs", "stop")));
+            trayMenu.Items.Add(trayStart); trayMenu.Items.Add(trayStop);
+            trayMenu.Items.Add(new ToolStripSeparator());
+            trayExit = new ToolStripMenuItem("退出管理器（后台继续运行）", null, (s, e) => ExitManager()); trayMenu.Items.Add(trayExit);
+            tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "蘸饭法庭 · 桌面管理器", ContextMenuStrip = trayMenu, Visible = !testing };
+            tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowManager(); };
+            tray.MouseDoubleClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowManager(); };
+        }
+        internal void HideToTray()
+        {
+            if (IsDisposed || trayTransition) return;
+            trayTransition = true;
+            try
+            {
+                if (Visible && WindowState != FormWindowState.Minimized) restoreState = WindowState;
+                // Hide already removes the taskbar button. Changing ShowInTaskbar here
+                // recreates the HWND and can re-enter Resize while Windows minimizes it.
+                tray.Visible = true; Hide();
+            }
+            finally { trayTransition = false; }
+        }
+        internal void ShowManager()
+        {
+            if (IsDisposed || trayTransition) return;
+            trayTransition = true;
+            try
+            {
+                var targetState = restoreState == FormWindowState.Maximized ? FormWindowState.Maximized : FormWindowState.Normal;
+                Show();
+                // Restore the native window after Show: the managed state alone can
+                // disagree with Windows after a minimize notification or handle recreation.
+                if (WindowState == FormWindowState.Minimized || IsIconic(Handle)) ShowWindow(Handle, 9); // SW_RESTORE
+                WindowState = targetState;
+                var bounds = targetState == FormWindowState.Normal ? Bounds : RestoreBounds;
+                if (!Screen.AllScreens.Any(screen => Rectangle.Intersect(screen.WorkingArea, new Rectangle(bounds.X, bounds.Y, bounds.Width, Math.Min(40, bounds.Height))).Width >= 100))
+                {
+                    var area = Screen.FromPoint(Cursor.Position).WorkingArea;
+                    WindowState = FormWindowState.Normal;
+                    Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
+                    Location = new Point(area.Left + Math.Max(0, (area.Width - Width) / 2), area.Top + Math.Max(0, (area.Height - Height) / 2));
+                    WindowState = targetState;
+                }
+                restoreState = targetState;
+                BringToFront(); Activate(); SetForegroundWindow(Handle);
+            }
+            finally { trayTransition = false; }
+            if (pendingFailure) { SelectTab(2); pendingFailure = false; tray.Text = "蘸饭法庭 · 桌面管理器"; }
+        }
+        internal void ExitManager()
+        {
+            if (busy)
+            {
+                ShowManager();
+                if (!testing) MessageBox.Show(this, "操作仍在执行，完成后可退出管理器。", Text);
+                return;
+            }
+            exitRequested = true; Close();
+        }
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            base.OnFormClosing(e);
+            if (e.CloseReason == CloseReason.UserClosing && !exitRequested) { e.Cancel = true; HideToTray(); }
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                timer.Stop(); timer.Dispose();
+                if (tray != null) { tray.Visible = false; tray.Dispose(); }
+                if (trayMenu != null) trayMenu.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+        internal bool IsInTray { get { return tray.Visible && !Visible; } }
         TableLayoutPanel Stack(TabPage page)
         {
             var stack = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Margin = Padding.Empty };
@@ -250,7 +451,10 @@ namespace BrokenArrowCourtDesktop
         internal void SetBusy(bool value)
         {
             busy = value; foreach (var b in operations) b.Enabled = !value;
+            trayStart.Enabled = trayStop.Enabled = trayExit.Enabled = !value;
             repositoryBox.Enabled = createBox.Enabled = consentBox.Enabled = restartBox.Enabled = interval.Enabled = !value;
+            autoSyncBox.Enabled = !value && ready && state.ContainsKey("sync_enabled") && state["sync_enabled"] != null;
+            sourceChoice.Enabled = statisticsFrom.Enabled = statisticsTo.Enabled = statisticsGroup.Enabled = statisticsSource.Enabled = !value;
             progress.Visible = value;
         }
         async Task Initialize()
@@ -275,7 +479,24 @@ namespace BrokenArrowCourtDesktop
             logBox.AppendText(line); currentLabel.Text = text;
             try { string dir = Path.Combine(root, ".desktop"); Directory.CreateDirectory(dir); File.AppendAllText(Path.Combine(dir, "manager.log"), line, Encoding.UTF8); } catch { }
         }
-        void Failure(Exception e) { Append("失败：" + e.Message); currentLabel.Text = "操作失败，详见日志"; if (!testing) MessageBox.Show(this, e.Message, "操作未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        internal void Failure(Exception e)
+        {
+            Append("失败：" + e.Message); currentLabel.Text = "操作失败，详见日志";
+            string summary = ErrorSummary(e.Message);
+            if (!Visible || IsInTray)
+            {
+                pendingFailure = true; tray.Text = "蘸饭法庭 · 操作失败，请查看运行日志";
+                if (!testing) tray.ShowBalloonTip(8000, "法庭操作未完成", summary.Length > 180 ? summary.Substring(0, 180) : summary, ToolTipIcon.Warning);
+                return;
+            }
+            if (!testing) MessageBox.Show(this, summary, "操作未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        internal static string ErrorSummary(string message)
+        {
+            string text = string.Join(Environment.NewLine, message.Replace("\r\n", "\n").Split('\n').Take(6));
+            if (text.Length > 500) text = text.Substring(0, 500);
+            return text + Environment.NewLine + Environment.NewLine + "完整错误已记录在“运行日志”中。";
+        }
         async Task Operation(string name, Func<Task> action)
         {
             if (busy) return; if (!ready) { Failure(new Exception("程序尚未准备完成，请先检查项目目录。")); return; }
@@ -301,6 +522,7 @@ namespace BrokenArrowCourtDesktop
             try
             {
                 var args = new List<string> { "scripts/desktop-control.mjs", "status" }; if (tools) args.Add("--tools");
+                AddStatisticsArgs(args);
                 var r = await Task.Run(() => Runner.Run(Bundle.Node(root), args, root, null));
                 if (r.Code != 0) throw new Exception(r.Error); Apply(Bundle.Json.Deserialize<Dictionary<string, object>>(r.Output));
                 if (tools) Append("环境与部署状态检查完成。");
@@ -309,11 +531,88 @@ namespace BrokenArrowCourtDesktop
         }
         string Value(string key, string fallback) { return state.ContainsKey(key) && state[key] != null ? state[key].ToString() : fallback; }
         string DateValue(string key) { DateTime date; return DateTime.TryParse(Value(key, ""), out date) ? date.ToLocalTime().ToString("MM-dd HH:mm:ss") : "未发布"; }
+        static string Bytes(object value)
+        {
+            double n = Convert.ToDouble(value ?? 0); string[] units = { "B", "KiB", "MiB", "GiB" }; int unit = 0;
+            while (n >= 1024 && unit < units.Length - 1) { n /= 1024; unit++; }
+            return n.ToString(unit == 0 ? "N0" : "N2") + " " + units[unit];
+        }
+        void AddStatisticsArgs(List<string> args)
+        {
+            if (queryFrom != "") { args.Add("--from"); args.Add(queryFrom); } if (queryTo != "") { args.Add("--to"); args.Add(queryTo); }
+            args.Add("--group"); args.Add(queryGroup); args.Add("--provider"); args.Add(queryProvider); args.Add("--page"); args.Add(statisticsPage.ToString());
+        }
+        async Task QueryStatistics(int page, bool readFilters)
+        {
+            if (busy || !ready) return;
+            if (readFilters) { queryFrom = statisticsFrom.Checked ? statisticsFrom.Value.ToString("yyyy-MM-dd") : ""; queryTo = statisticsTo.Checked ? statisticsTo.Value.ToString("yyyy-MM-dd") : ""; queryGroup = new[] { "day", "month", "year" }[statisticsGroup.SelectedIndex]; queryProvider = new[] { "all", "batrace", "official" }[statisticsSource.SelectedIndex]; }
+            statisticsPage = page; SetBusy(true);
+            try { await Refresh(false); currentLabel.Text = "统计查询完成"; } catch (Exception error) { Failure(error); } finally { SetBusy(false); }
+        }
+        async Task ChangeSource()
+        {
+            if (busy || !ready) return; SetBusy(true);
+            try { await Node("scripts/desktop-control.mjs", "source", sourceChoice.SelectedIndex == 1 ? "official" : "batrace"); sourceDirty = false; await Refresh(false); currentLabel.Text = "数据源已切换；自动同步开关保持原状态"; }
+            catch (Exception error) { Failure(error); } finally { SetBusy(false); }
+        }
+        async Task ScanStorage()
+        {
+            if (busy || !ready) return; SetBusy(true);
+            try { var args = new List<string> { "scripts/desktop-control.mjs", "status", "--storage" }; AddStatisticsArgs(args); var result = await Task.Run(() => Runner.Run(Bundle.Node(root), args, root, null)); if (result.Code != 0) throw new Exception(result.Error); Apply(Bundle.Json.Deserialize<Dictionary<string, object>>(result.Output)); currentLabel.Text = "空间占用已更新"; }
+            catch (Exception error) { Failure(error); } finally { SetBusy(false); }
+        }
+        async Task ToggleAutoSync()
+        {
+            if (busy || !ready) return;
+            bool enabled = autoSyncBox.Checked; SetBusy(true);
+            try { await Node("scripts/desktop-control.mjs", "sync", enabled ? "on" : "off"); await Refresh(false); currentLabel.Text = enabled ? "自动同步已开启，按时间表检查" : "自动同步已关闭"; }
+            catch (Exception error) { autoSyncBox.Checked = Value("sync_enabled", "False") == "True"; Failure(error); }
+            finally { SetBusy(false); }
+        }
+        string LastSyncText()
+        {
+            object value; if (!state.TryGetValue("last_sync", out value) || value == null) return "尚无同步记录";
+            var sync = value as Dictionary<string, object>; DateTimeOffset date;
+            if (sync == null || !sync.ContainsKey("finished_at") || !DateTimeOffset.TryParse(Convert.ToString(sync["finished_at"]), out date)) return "尚无同步记录";
+            var elapsed = DateTimeOffset.UtcNow - date;
+            string age = elapsed.TotalMinutes < 1 ? "刚刚" : elapsed.TotalHours < 1 ? (int)elapsed.TotalMinutes + " 分钟前" : elapsed.TotalDays < 1 ? (int)elapsed.TotalHours + " 小时前" : (int)elapsed.TotalDays + " 天前";
+            string status = Convert.ToString(sync["status"]);
+            return age + (status == "complete" ? "（完成）" : status == "partial" ? "（部分完成）" : status == "failed" ? "（失败）" : "（已结束）");
+        }
         internal void Apply(Dictionary<string, object> next)
         {
-            state = next; serviceLabel.Text = "后台：" + (Value("service_running", "False") == "True" ? "运行中" : "未运行");
+            if (!next.ContainsKey("storage") && state.ContainsKey("storage")) next["storage"] = state["storage"];
+            state = next; serviceLabel.Text = "后台：" + (Value("service_running", "False") == "True" ? "运行中" : "未运行") + "    上次同步结束：" + LastSyncText();
+            tray.Text = "蘸饭法庭 · 后台" + (Value("service_running", "False") == "True" ? "运行中" : "未运行");
             archiveLabel.Text = "朋友：" + Value("friends", "0") + "    开黑对局：" + Value("matches", "0");
             publicationLabel.Text = "最后推送：" + DateValue("pushed_at");
+            autoSyncBox.Checked = Value("sync_enabled", "False") == "True";
+            autoSyncBox.Text = autoSyncBox.Checked ? "开启自动同步（已开启）" : "开启自动同步（已关闭）";
+            autoSyncBox.Enabled = !busy && ready && next.ContainsKey("sync_enabled") && next["sync_enabled"] != null;
+            if (!sourceDirty) { applyingSource = true; sourceChoice.SelectedIndex = Value("source_provider", "batrace") == "official" ? 1 : 0; applyingSource = false; }
+            var schedule = next.ContainsKey("sync_schedule") ? next["sync_schedule"] as Dictionary<string, object> : null;
+            if (schedule != null)
+            {
+                var hours = schedule["day_hours"] as IEnumerable;
+                string dayHours = hours == null ? "—" : string.Join("、", hours.Cast<object>().Select(hour => Convert.ToInt32(hour).ToString("00") + ":00"));
+                scheduleLabel.Text = "自动检查（北京时间）：白天 " + dayHours + "；" + Convert.ToInt32(schedule["fast_start_hour"]).ToString("00") + ":00～次日 " + Convert.ToInt32(schedule["fast_end_hour"]).ToString("00") + ":00 每 " + schedule["fast_minutes"] + " 分钟\n开关立即保存 · 开启后需保持后台运行";
+            }
+            var monitor = next.ContainsKey("request_monitor") ? next["request_monitor"] as Dictionary<string, object> : null;
+            trafficLabel.Text = monitor == null ? "请求统计：暂无监控数据" : "今日可核实请求：" + monitor["today"] + " 次    正文：" + (Convert.ToInt64(monitor["unknown_bytes_today"]) > 0 ? "含历史未知" : Bytes(monitor["bytes_today"])) + "    累计至少：" + monitor["total"] + " 次";
+            int firstRow = requestHistory.FirstDisplayedScrollingRowIndex;
+            requestHistory.Rows.Clear();
+            if (monitor != null && monitor.ContainsKey("daily")) foreach (var row in ((IEnumerable)monitor["daily"]).Cast<Dictionary<string, object>>()) requestHistory.Rows.Add(row["date"], row["requests"], row["recorded_requests"] + " / " + row["legacy_requests"] + " / " + row["supplement_requests"], Convert.ToInt64(row["unknown_bytes_requests"]) > 0 ? (Convert.ToInt64(row["bytes"]) > 0 ? Bytes(row["bytes"]) + " + 未知" : "历史未知") : Bytes(row["bytes"]), row["runs"]);
+            if (monitor != null && monitor.ContainsKey("statistics")) {
+                var result = (Dictionary<string, object>)monitor["statistics"]; var summary = (Dictionary<string, object>)result["summary"];
+                statisticsPages = Convert.ToInt32(result["total_pages"]); statisticsPage = Convert.ToInt32(result["page"]);
+                statisticsLabel.Text = result["from"] + "～" + result["to"] + " · 第 " + statisticsPage + " / " + statisticsPages + " 页 · 合计至少 " + summary["requests"] + " 次\n来源列：逐次 / 旧日志 / 补证；" + summary["unknown_bytes_requests"] + " 次历史正文未知。历史日按任务开始日期归属。";
+            }
+            if (next.ContainsKey("storage")) {
+                var disk = (Dictionary<string, object>)next["storage"]; var volume = disk["volume"] as Dictionary<string, object>;
+                storageLabel.Text = "项目文件：" + Bytes(disk["project_bytes"]) + "    数据库：" + Bytes(disk["database_bytes"]) + "\n数据目录：" + Bytes(disk["data_bytes"]) + "    其中备份：" + Bytes(disk["backup_bytes"]) + "\n站点：" + Bytes(disk["site_bytes"]) + "    磁盘可用：" + (volume == null ? "不可用" : Bytes(volume["available_bytes"])) + "\n按文件大小合计；备份已计入数据目录，跳过符号链接。";
+                storageHistory.Rows.Clear(); foreach (var row in ((IEnumerable)disk["groups"]).Cast<Dictionary<string, object>>()) storageHistory.Rows.Add(row["name"], Bytes(row["bytes"]), row["files"]);
+            }
+            if (firstRow >= 0 && firstRow < requestHistory.Rows.Count) requestHistory.FirstDisplayedScrollingRowIndex = firstRow;
             // Background status polling must not erase an unsaved repository entry.
             if (repositoryBox.Text.Length == 0) repositoryBox.Text = Value("repository", "");
             if (!interval.Focused) { decimal n; if (decimal.TryParse(Value("interval_minutes", "120"), out n)) interval.Value = Math.Max(interval.Minimum, Math.Min(interval.Maximum, n)); }
@@ -336,9 +635,15 @@ namespace BrokenArrowCourtDesktop
         }
         async void Publish()
         {
-            if (!ConfirmPublication("立即发布最新网页和数据？", Value("repository", ""))) return;
+            if (!CanUpdateWebsite()) return;
             await Operation("更新网页", async () => { await Node("scripts/publish-site.mjs"); Append("发布命令已完成；相同内容不会创建新提交。请检查云端构建状态。"); });
         }
+        internal bool CanUpdateWebsite()
+        {
+            if (String.IsNullOrWhiteSpace(Value("repository", ""))) { Failure(new Exception("尚未配置发布仓库，请先填写仓库并完成首次部署。")); return false; }
+            return true;
+        }
+        internal bool DeploymentConsentChecked { get { return consentBox.Checked; } }
         async void Login()
         {
             string gh = Runner.Tool("gh.exe"); if (gh == null) { Failure(new Exception("未找到 GitHub CLI，请使用窗口下方的官方下载入口安装。")); return; }
@@ -369,7 +674,7 @@ namespace BrokenArrowCourtDesktop
         internal void TestReady() { ready = true; SetBusy(false); }
         internal void SaveScreenshot(string file, Size size)
         {
-            ShowInTaskbar = false; StartPosition = FormStartPosition.Manual; Location = new Point(-20000, -20000);
+            StartPosition = FormStartPosition.Manual; Location = new Point(-20000, -20000);
             Size = size; if (!Visible) Show(); PerformLayout(); Application.DoEvents();
             using (var bitmap = new Bitmap(Width, Height))
             {
@@ -391,6 +696,23 @@ namespace BrokenArrowCourtDesktop
 
     static class SelfTest
     {
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window, int command);
+
+        static void Pump()
+        {
+            var until = DateTime.UtcNow.AddMilliseconds(80);
+            do { Application.DoEvents(); Thread.Sleep(5); } while (DateTime.UtcNow < until);
+        }
+        static void CheckRestored(ManagerForm form, IntPtr handle, FormWindowState expected)
+        {
+            Pump();
+            if (form.Handle != handle) throw new Exception("Tray transition recreated the manager window handle");
+            if (!form.Visible || !form.ShowInTaskbar || form.IsInTray || form.WindowState != expected || IsIconic(form.Handle) || !IsWindowVisible(form.Handle))
+                throw new Exception("Manager did not restore a visible, non-minimized native window");
+        }
+
         internal static void Run(string output)
         {
             Directory.CreateDirectory(output); string root = Path.Combine(output, "sample project"), node = Bundle.Node(root);
@@ -406,24 +728,105 @@ namespace BrokenArrowCourtDesktop
                 var start = Runner.Run(node, new[] { "scripts/service.mjs", "start" }, root, null); if (start.Code != 0) throw new Exception("Fixture service start failed: " + start.Error);
                 var status = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "status" }, root, null);
                 var state = Bundle.Json.Deserialize<Dictionary<string, object>>(status.Output); if (!(bool)state["service_running"]) throw new Exception("Service health check failed");
+                var off = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "sync", "off" }, root, null);
+                if (off.Code != 0 || !off.Output.Contains("false")) throw new Exception("Desktop sync pause failed: " + off.Error);
+                var on = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "sync", "on" }, root, null);
+                if (on.Code != 0 || !on.Output.Contains("true")) throw new Exception("Desktop sync enable failed: " + on.Error);
+                off = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "sync", "off" }, root, null);
+                if (off.Code != 0) throw new Exception("Desktop sync pause after enable failed");
+                var official = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "source", "official" }, root, null);
+                if (official.Code != 0) throw new Exception("Official source selection failed: " + official.Error);
+                var batrace = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "source", "batrace" }, root, null);
+                if (batrace.Code != 0) throw new Exception("BATrace source selection failed: " + batrace.Error);
+                state = Bundle.Json.Deserialize<Dictionary<string, object>>(Runner.Run(node, new[] { "scripts/desktop-control.mjs", "status", "--storage" }, root, null).Output);
+                if ((bool)state["sync_enabled"] || state["request_monitor"] == null) throw new Exception("Desktop traffic or saved sync state missing");
+                if (state["storage"] == null || Convert.ToString(state["source_provider"]) != "batrace") throw new Exception("Storage or source status missing");
+                using (var instance = new ManagerInstance(root))
                 using (var form = new ManagerForm(root, true))
                 {
+                    if (!instance.IsPrimary) throw new Exception("Fixture manager instance already exists");
+                    instance.Listen(form);
                     form.TestReady(); form.Apply(state); form.Append("本机后台已启动。测试未创建仓库或推送数据。");
+                    if (form.DeploymentConsentChecked || form.CanUpdateWebsite()) throw new Exception("Unconfigured publication was allowed");
+                    var configured = new Dictionary<string, object>(state); configured["repository"] = "owner/court"; form.Apply(configured);
+                    if (form.DeploymentConsentChecked || !form.CanUpdateWebsite()) throw new Exception("Routine update still requires deployment consent");
                     form.SaveScreenshot(Path.Combine(output, "manager-desktop.png"), new Size(1120, 840));
                     form.SaveScreenshot(Path.Combine(output, "manager-compact.png"), new Size(950, 740));
+                    form.SelectTab(3); form.SaveScreenshot(Path.Combine(output, "requests-desktop.png"), new Size(1120, 840));
+                    form.SaveScreenshot(Path.Combine(output, "requests-compact.png"), new Size(950, 740));
+                    form.SelectTab(4); form.SaveScreenshot(Path.Combine(output, "storage-desktop.png"), new Size(1120, 840));
+                    form.SaveScreenshot(Path.Combine(output, "storage-compact.png"), new Size(950, 740));
                     form.SelectTab(1); form.SaveScreenshot(Path.Combine(output, "publish-desktop.png"), new Size(1120, 840));
                     form.SaveScreenshot(Path.Combine(output, "publish-compact.png"), new Size(950, 740));
                     form.SelectTab(2); form.SaveScreenshot(Path.Combine(output, "logs-desktop.png"), new Size(1120, 840));
                     form.SetBusy(true); if (!form.AllOperationButtonsDisabled()) throw new Exception("Busy actions were not disabled");
+                    form.WindowState = FormWindowState.Minimized; Application.DoEvents();
+                    if (!form.IsInTray || form.IsDisposed) throw new Exception("Minimize did not preserve the manager in the tray");
+                    form.ShowManager(); Application.DoEvents();
+                    if (!form.Visible || !form.ShowInTaskbar || form.WindowState != FormWindowState.Normal) throw new Exception("Tray restore did not restore the manager");
+                    form.Close(); Application.DoEvents();
+                    if (!form.IsInTray || form.IsDisposed) throw new Exception("Close interrupted an operation instead of hiding to the tray");
+                    form.ExitManager();
+                    if (form.IsDisposed) throw new Exception("Manager exited during an operation");
                     form.SetBusy(false);
+                    // Exercise Windows minimize messages, not only the managed WindowState value.
+                    form.ShowManager(); form.WindowState = FormWindowState.Normal; Pump();
+                    var stableHandle = form.Handle;
+                    for (int cycle = 0; cycle < 20; cycle++)
+                    {
+                        var expectedState = cycle % 2 == 0 ? FormWindowState.Normal : FormWindowState.Maximized;
+                        form.WindowState = expectedState; Pump();
+                        ShowWindow(form.Handle, 6); Pump();
+                        if (!form.IsInTray || IsWindowVisible(form.Handle)) throw new Exception("Native minimize did not hide the manager");
+                        form.ShowManager(); CheckRestored(form, stableHandle, expectedState);
+                        form.ShowManager(); CheckRestored(form, stableHandle, expectedState);
+                        form.Close(); Pump();
+                        if (!form.IsInTray || form.IsDisposed) throw new Exception("Close did not preserve the manager");
+                        form.ShowManager(); CheckRestored(form, stableHandle, expectedState);
+                    }
+                    form.HideToTray(); form.ExitManager(); Application.DoEvents();
+                    if (!form.IsDisposed) throw new Exception("Explicit tray exit did not dispose the manager");
                 }
+                using (var instance = new ManagerInstance(root))
+                using (var form = new ManagerForm(root, true))
+                using (var duplicate = new ManagerInstance(root))
+                {
+                    if (!instance.IsPrimary || duplicate.IsPrimary) throw new Exception("Duplicate manager did not reuse the primary instance");
+                    instance.Listen(form); form.TestReady(); form.Show(); form.HideToTray();
+                    form.Failure(new Exception(new string('x', 5000)));
+                    if (!form.IsInTray || form.IsDisposed) throw new Exception("Background failure opened a blocking window");
+                    if (ManagerForm.ErrorSummary(new string('x', 5000)).Length > 600) throw new Exception("Failure dialog summary is unbounded");
+                    var activation = Task.Run(() => duplicate.ActivateExisting(3000));
+                    var deadline = DateTime.UtcNow.AddSeconds(5);
+                    while (!activation.IsCompleted && DateTime.UtcNow < deadline) { Application.DoEvents(); Thread.Sleep(10); }
+                    if (!activation.IsCompleted || !activation.Result || !form.Visible || !form.ShowInTaskbar) throw new Exception("Second launch did not restore the hidden manager");
+                    var stableHandle = form.Handle;
+                    for (int cycle = 0; cycle < 8; cycle++)
+                    {
+                        var expectedState = cycle % 2 == 0 ? FormWindowState.Normal : FormWindowState.Maximized;
+                        form.WindowState = expectedState; Pump();
+                        ShowWindow(form.Handle, 6); Pump();
+                        var repeatedActivation = Task.Run(() => duplicate.ActivateExisting(3000));
+                        var repeatDeadline = DateTime.UtcNow.AddSeconds(5);
+                        while (!repeatedActivation.IsCompleted && DateTime.UtcNow < repeatDeadline) { Application.DoEvents(); Thread.Sleep(10); }
+                        if (!repeatedActivation.IsCompleted || !repeatedActivation.Result) throw new Exception("Repeated launch was not acknowledged");
+                        CheckRestored(form, stableHandle, expectedState);
+                    }
+                    form.WindowState = FormWindowState.Normal; form.Location = new Point(-20000, -20000);
+                    form.HideToTray(); form.ShowManager(); CheckRestored(form, stableHandle, FormWindowState.Normal);
+                    if (!Screen.AllScreens.Any(screen => screen.WorkingArea.IntersectsWith(new Rectangle(form.Left, form.Top, form.Width, 40))))
+                        throw new Exception("Restored manager title bar remained off screen");
+                    form.ExitManager(); Application.DoEvents();
+                }
+                var afterExit = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "status" }, root, null);
+                if (afterExit.Code != 0 || !(bool)Bundle.Json.Deserialize<Dictionary<string, object>>(afterExit.Output)["service_running"]) throw new Exception("Tray actions stopped the backend");
                 string probe = Path.Combine(root, ".desktop", "argument probe.mjs");
                 File.WriteAllText(probe, "console.log(JSON.stringify(process.argv.slice(2))); console.error('expected stderr'); process.exitCode=7;", new UTF8Encoding(false));
                 var expected = new[] { "含空格的参数", "quote\"value", "C:\\trailing\\" };
                 var failure = Runner.Run(node, new[] { probe }.Concat(expected), root, null);
                 var actual = Bundle.Json.Deserialize<string[]>(failure.Output);
                 if (failure.Code != 7 || !actual.SequenceEqual(expected) || !failure.Error.Contains("expected stderr")) throw new Exception("Process arguments or error reporting failed");
-                File.WriteAllText(Path.Combine(output, "result.json"), Bundle.Json.Serialize(new { ok = true, node = version.Output, checks = new[] { "safe bundle extraction", "no private data embedded", "bundled runtime", "no config leak in status", "fixture backend start/status/stop", "desktop/compact screenshots", "busy action protection", "Unicode and quoted process arguments", "stderr and exit status" } }), Encoding.UTF8);
+                File.WriteAllText(Path.Combine(output, "result.json"), Bundle.Json.Serialize(new { ok = true, node = version.Output, checks = new[] { "safe bundle extraction", "no private data embedded", "bundled runtime", "no config leak in status", "fixture backend start/status/stop", "routine updates need no consent checkbox", "unconfigured publication remains blocked", "desktop/compact screenshots", "busy action protection", "minimize and close to tray", "restore from tray", "20 repeated native minimize/restore cycles with stable HWND", "normal and maximized state preservation", "explicit exit keeps backend running", "single manager per project", "second launch restores hidden manager", "8 repeated second-launch activations", "off-screen title bar recovery", "background failures never block in a hidden dialog", "bounded error summaries", "Unicode and quoted process arguments", "stderr and exit status" } }), Encoding.UTF8);
             }
             finally { var stop = Runner.Run(node, new[] { "scripts/service.mjs", "stop" }, root, null); if (stop.Code != 0) throw new Exception("Fixture service stop failed"); }
         }

@@ -2,7 +2,7 @@ import { DatabaseSync, backup } from 'node:sqlite';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { Store, now } from '../src/db.mjs';
-import { SourceClient } from '../src/source.mjs';
+import {createSource} from '../src/source-provider.mjs';
 import { extractFlight } from '../src/domain.mjs';
 
 try { process.loadEnvFile('.env'); } catch (error) { if(error.code!=='ENOENT') throw error; }
@@ -10,7 +10,7 @@ const directory=path.resolve(process.env.DATA_DIR||'data');
 await mkdir(path.join(directory,'backups'),{recursive:true});
 const db=new DatabaseSync(path.join(directory,'court.sqlite'),{readOnly:true});
 try { await backup(db,path.join(directory,'backups',`before-analysis-${now().replace(/[:.]/g,'-')}.sqlite`)); } finally { db.close(); }
-const store=new Store(directory);const source=new SourceClient(store);
+const store=new Store(directory);const source=createSource(store);
 try {
   const html=await source.read('/units',{json:false});let props;
   function walk(v){if(!v||typeof v!=='object')return;if(Array.isArray(v.initialSpecializations))props=v;for(const[k,x]of Object.entries(v))if(!['messages','dangerouslySetInnerHTML','initialUnits'].includes(k))walk(x);}

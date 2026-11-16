@@ -26,3 +26,21 @@ export function detailFor(raw) {
 export function flightPage(props) {
   return `<html><script>self.__next_f.push(${JSON.stringify([1,`20:${JSON.stringify(['$','$L1',null,props])}\n`])})</script></html>`;
 }
+
+export function selfDestructionPrices(store){
+  const unit={id:238,base_cost:100,catalogue:{id:238,hudName:'Fixture armored unit'},slots:[
+    {id:1,name:'武器',options:[{id:560,key:'Cannon',name:'主炮',cost:10}]},
+    {id:2,name:'装甲',options:[{id:1634,key:'Armor',name:'标准装甲',cost:0}]},
+  ]};
+  const model={version:'unit-loadouts-v1',version_name:'fixture',units:{238:unit}};
+  for(const [key,value]of [['unit_loadouts',model],['unit_loadout_history',{price_catalogues:[model]}]])
+    store.run('INSERT OR REPLACE INTO analysis_catalogue VALUES(?,?,?)',key,JSON.stringify(value),'now');
+}
+
+export function airUnit(id=900) {
+  const turret=(id,type,isDefault=false,quantity=1)=>({turret:{id,isDefault,weapons:type===null?[]:[{weapon:{type,ammunition:[{quantity}]}}]}});
+  const option=(id,name,turret,slot=1)=>({id,name,uiName:name,isDefault:id===100||id===200,replaceUnitId:0,[`turret${slot}Id`]:turret});
+  return {id,hudName:'Fixture multirole',role:164,turrets:[turret(1,116,true),turret(2,87,true),turret(3,160),turret(4,null),turret(5,84),turret(6,88,false,0)],
+    modifications:[{id:10,name:'Wing',options:[option(100,'AAM',2),option(101,'Bomb',3),option(102,'Empty',4),option(103,'ARM',5),option(104,'No ammunition',6)]},
+      {id:11,name:'Fuselage',options:[option(200,'Fuel and ECM',4,2),option(201,'Bomb',3,2),{...option(202,'Replacement',4,2),replaceUnitId:999}]}]};
+}

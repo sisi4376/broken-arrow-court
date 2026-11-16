@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import path from 'node:path';
 import { Store, now } from '../src/db.mjs';
-import { SourceClient } from '../src/source.mjs';
+import {createSource} from '../src/source-provider.mjs';
 import { SyncEngine } from '../src/sync.mjs';
 
 try { process.loadEnvFile('.env'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -30,7 +30,7 @@ try { await backup(original, backupFile); } finally { original.close(); }
 console.log(JSON.stringify({ backup: backupFile }));
 
 const store = new Store(directory);
-const source = new SourceClient(store);
+const source = createSource(store);
 const engine = new SyncEngine(store, source);
 const previousSync = store.settings().sync_enabled;
 let runId;

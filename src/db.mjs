@@ -19,13 +19,37 @@ export class Store {
   }
   migrate() {
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 4) throw new Error('数据库版本高于程序支持的版本');
-    if (version === 4) return;
+    if (version > 7) throw new Error('数据库版本高于程序支持的版本');
+    if (version === 7) { this.repairOfficialDefaultModes(); return; }
+    if(version===6){
+      this.db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE request_history_evidence(evidence_key TEXT PRIMARY KEY,base TEXT NOT NULL,day TEXT NOT NULL,requests INTEGER NOT NULL CHECK(requests>=0),kind TEXT NOT NULL,evidence_json TEXT NOT NULL,imported_at TEXT NOT NULL);
+        INSERT OR IGNORE INTO settings(key,value) SELECT 'request_history_cutoff_run_id',CAST(COALESCE(MAX(id),0) AS TEXT) FROM sync_runs;
+        PRAGMA user_version=7; COMMIT;`);
+      this.migrate();return;
+    }
+    if (version === 5) {
+      this.db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE source_requests(id INTEGER PRIMARY KEY,base TEXT NOT NULL,resource TEXT NOT NULL,category TEXT NOT NULL,run_id INTEGER,trigger TEXT NOT NULL,attempt INTEGER NOT NULL,started_at INTEGER NOT NULL,finished_at INTEGER,status INTEGER,bytes INTEGER NOT NULL DEFAULT 0,outcome TEXT NOT NULL,error TEXT);
+        CREATE INDEX source_requests_time ON source_requests(base,started_at);
+        CREATE INDEX source_requests_resource ON source_requests(base,resource,started_at);
+        CREATE TABLE source_request_blocks(id INTEGER PRIMARY KEY,base TEXT NOT NULL,resource TEXT NOT NULL,created_at INTEGER NOT NULL,retry_at INTEGER NOT NULL,reason TEXT NOT NULL);
+        PRAGMA user_version=6; COMMIT;`);
+      this.migrate();return;
+    }
+    if (version === 4) {
+      this.db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS source_cache(base TEXT NOT NULL,resource TEXT NOT NULL,payload_gzip BLOB NOT NULL,checked_at INTEGER NOT NULL,PRIMARY KEY(base,resource));
+        PRAGMA user_version=5; COMMIT;`);
+      this.migrate();
+      return;
+    }
     if (version === 3) {
       this.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE analysis_catalogue(key TEXT PRIMARY KEY,data_json TEXT NOT NULL,updated_at TEXT NOT NULL);
         CREATE TABLE match_decks(match_id TEXT NOT NULL REFERENCES matches(id) ON DELETE CASCADE,player_id TEXT NOT NULL,spec1 INTEGER NOT NULL,spec2 INTEGER NOT NULL,updated_by INTEGER REFERENCES users(id),updated_at TEXT NOT NULL,PRIMARY KEY(match_id,player_id));
         PRAGMA user_version=4; COMMIT;`);
+      this.migrate();
       return;
     }
     if (version === 2) {
@@ -71,6 +95,30 @@ export class Store {
       INSERT INTO settings VALUES ('sync_enabled','true'),('sync_minutes','15'),('request_delay_ms','1800'),('backup_days','14');
       PRAGMA user_version=1; COMMIT;`);
     this.migrate();
+  }
+  repairOfficialDefaultModes() {
+    const candidates=this.all("SELECT id,raw_json,detail_json FROM matches WHERE mode='-1' AND detail_json IS NOT NULL");
+    if(!candidates.length)return;
+    this.transaction(()=>{
+      let repaired=0;
+      for(const row of candidates){
+        let detail,original;
+        try{detail=JSON.parse(row.detail_json);}catch{continue;}
+        if(detail.metadata?.source!=='official'||detail.metadata.mode_unknown!==true)continue;
+        const snapshot=this.get('SELECT payload_gzip FROM source_snapshots WHERE source_key=? ORDER BY id DESC LIMIT 1',`/fights/fight_${row.id}.json`);
+        if(!snapshot)continue;
+        try{original=JSON.parse(gunzipSync(snapshot.payload_gzip));}catch{continue;}
+        // Repair only a proven omitted default, never an explicit unknown type.
+        if(!original?.Data||!Number.isFinite(original.EndTime)||original.Type!=null)continue;
+        const raw={...JSON.parse(row.raw_json),Type:0};
+        detail={...detail,data:{...detail.data,Type:0},metadata:{...detail.metadata,mode_unknown:false,mode_defaulted:true}};
+        const json=JSON.stringify(raw);
+        this.run('UPDATE matches SET mode=?,raw_json=?,content_hash=?,detail_json=?,updated_at=? WHERE id=?','0',json,digest(json),JSON.stringify(detail),now(),row.id);
+        // Append corrected derived versions. Original network evidence is immutable.
+        this.snapshot(`match:${row.id}`,raw);this.snapshot(`match-detail:${row.id}`,detail);repaired++;
+      }
+      if(repaired)this.event(null,'info',`已依据官方原始战报修正 ${repaired} 场省略 Type=0 的普通模式，保留原始响应快照`);
+    });
   }
   get(sql, ...args) { return this.db.prepare(sql).get(...args); }
   all(sql, ...args) { return this.db.prepare(sql).all(...args); }

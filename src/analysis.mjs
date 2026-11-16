@@ -1,5 +1,8 @@
 import { filters, memberStats } from './queries.mjs';
 import { mapName } from './domain.mjs';
+import { zhanfanAnalysis } from './zhanfan.mjs';
+import {unitDisplayCatalogue,displayUnit} from './unit-display-catalogue.mjs';
+import {unitNameResolver} from './unit-name-catalogue.mjs';
 
 export function deckModel(store) {
   const row=store.get("SELECT data_json FROM analysis_catalogue WHERE key='deck_model'");
@@ -99,14 +102,36 @@ function trend(rows) {
   return {recent:finish(recent),recent_results:last.map(r=>({match_id:r.match_id,won:r.won,end_time:r.end_time})),current_streak:current,best_win_streak:bestWin,best_loss_streak:bestLoss,periods};
 }
 function unitPreferences(store,params,allRows,memberId) {
-  const f=filters(params);const extra=memberId?' AND r.member_id=?':'';
-  const used=store.all(`SELECT r.member_id,u.match_id,u.unit_id,COUNT(*) AS instances,SUM(u.kills) AS kills,SUM(u.damage) AS damage,SUM(u.damage_received) AS damage_received,SUM(u.refunded) AS refunded,SUM(u.death_time IS NOT NULL) AS deaths,SUM(u.supply) AS supply,c.data_json AS catalogue_json
+  const f=filters(params);const extra=memberId?' AND r.member_id=?':'';const display=unitDisplayCatalogue(store),resolveName=unitNameResolver(store);
+  const used=store.all(`SELECT r.member_id,u.match_id,u.unit_id,m.end_time,m.duration,${resolveName.preResolved?'NULL':"json_extract(u.raw_json,'$.OptionIds')"} AS option_ids,json_extract(u.raw_json,'$.AnalysisDisplayName') AS display_name,COUNT(*) AS instances,SUM(u.kills) AS kills,SUM(u.damage) AS damage,SUM(u.damage_received) AS damage_received,SUM(u.refunded) AS refunded,SUM(u.death_time IS NOT NULL) AS deaths,SUM(u.supply) AS supply,c.data_json AS catalogue_json
     FROM unit_instances u JOIN registered_participants r ON r.match_id=u.match_id AND r.player_id=u.player_id JOIN matches m ON m.id=u.match_id LEFT JOIN unit_catalogue c ON c.unit_id=u.unit_id
-    WHERE ${f.sql}${extra} AND m.detail_state='complete' GROUP BY r.member_id,u.match_id,u.unit_id`,...f.args,...(memberId?[memberId]:[]));
+    WHERE ${f.sql}${extra} AND m.detail_state='complete' GROUP BY r.member_id,u.match_id,u.unit_id,option_ids,display_name`,...f.args,...(memberId?[memberId]:[]));
   const outcomes=new Map(allRows.map(r=>[`${r.match_id}:${r.member_id}`,r]));const groups=new Map();
-  for(const u of used){let g=groups.get(u.unit_id);if(!g){g={...metric(),key:u.unit_id,unit_id:u.unit_id,instances:0,kills:0,unit_damage:0,damage_received:0,refunded:0,deaths:0,supply:0,catalogue:u.catalogue_json?JSON.parse(u.catalogue_json):null};groups.set(u.unit_id,g);}const r=outcomes.get(`${u.match_id}:${u.member_id}`);if(!r)continue;add(g,r);for(const k of ['instances','kills','damage_received','refunded','deaths','supply'])g[k]+=u[k]??0;g.unit_damage+=u.damage??0;}
+  const group=(u,key,name=null)=>({...metric(),key,unit_id:u.unit_id,display_name:name,instances:0,kills:0,unit_damage:0,damage_received:0,refunded:0,deaths:0,supply:0,catalogue:u.catalogue_json?JSON.parse(u.catalogue_json):null,seen:new Set(),variants:new Map()});
+  const accumulate=(g,u,r)=>{
+    const key=`${u.match_id}:${u.member_id}`;if(!g.seen.has(key)){add(g,r);g.seen.add(key);}
+    for(const k of ['instances','kills','damage_received','refunded','deaths','supply'])g[k]+=u[k]??0;g.unit_damage+=u.damage??0;
+  };
+  for(const u of used){
+    const r=outcomes.get(`${u.match_id}:${u.member_id}`);if(!r)continue;
+    let g=groups.get(u.unit_id);if(!g){g=group(u,u.unit_id);groups.set(u.unit_id,g);}accumulate(g,u,r);
+    const name=resolveName(u,g.catalogue),key=JSON.stringify([u.unit_id,name]);
+    let variant=g.variants.get(key);if(!variant){variant=group(u,key,name);g.variants.set(key,variant);}accumulate(variant,u,r);
+  }
   const complete=allRows.filter(r=>(!memberId||r.member_id===memberId)&&r.complete).length;
-  return [...groups.values()].map(g=>({...finish(g),damage:g.unit_damage,usage_rate:complete?g.matches/complete:null})).sort((a,b)=>b.matches-a.matches||b.instances-a.instances||String(a.unit_id).localeCompare(String(b.unit_id)));
+  const finalized=g=>{
+    const {seen,variants,...data}=g;
+    return {...finish(data),catalogue:displayUnit(display,g.unit_id,g.catalogue),damage:g.unit_damage,usage_rate:complete?g.matches/complete:null};
+  };
+  return [...groups.values()].map(g=>({...finalized(g),variants:[...g.variants.values()].some(v=>v.display_name)?[...g.variants.values()].map(finalized).sort((a,b)=>b.instances-a.instances||String(a.display_name??'').localeCompare(String(b.display_name??''))):[]})).sort((a,b)=>b.matches-a.matches||b.instances-a.instances||String(a.unit_id).localeCompare(String(b.unit_id)));
+}
+function unitHighlights(units) {
+  const highest=key=>{
+    const eligible=units.filter(u=>Number.isFinite(u[key])&&u[key]>0);
+    const maximum=Math.max(0,...eligible.map(u=>u[key]));
+    return eligible.filter(u=>u[key]===maximum).sort((a,b)=>String(a.unit_id).localeCompare(String(b.unit_id),'en',{numeric:true}));
+  };
+  return {most_used:highest('instances'),most_damage:highest('damage'),most_kills:highest('kills')};
 }
 function summarize(rows,min) {
   const total=metric();rows.forEach(r=>add(total,r));
@@ -128,7 +153,26 @@ export function friendAnalysis(store,id,params=new URLSearchParams()) {
   const model=deckModel(store),min=minimum(params),all=records(store,scoped,model),rows=all.filter(r=>r.member_id===member.id);
   const base=summarize(rows,min);
   const teammates=relationships(all,member.id,min),units=unitPreferences(store,scoped,rows,member.id);
-  return {...base,member,min_games:min,teammates,units,trend:trend(rows),stats:memberStats(store,scoped).find(m=>m.member_id===member.id)??null,
+  const court=zhanfanAnalysis(store,scoped);
+  return {...base,member,min_games:min,teammates,units,unit_highlights:unitHighlights(units),trend:trend(rows),stats:memberStats(store,scoped).find(m=>m.member_id===member.id)??null,
+    court:{model:court.model,min_games:court.min_games,sentencing_window:court.sentencing_window,report:court.members.find(r=>r.member_id===member.id)??null},
     recent_matches:rows.slice(-20).reverse().map(r=>({id:r.match_id,end_time:r.end_time,map:mapName(r.map_id),won:r.won,rating_delta:r.rating_delta,deck:r.deck,destruction:r.destruction,losses:r.losses,accounts:r.accounts})),
+    match_archive:personalMatches(store,member.id,params),
     model:{updated_at:model.updated_at??null,db_file:model.db_file??null}};
+}
+
+export function personalMatches(store,memberId,params=new URLSearchParams()){
+  const scoped=new URLSearchParams(params);scoped.set('scope','all');scoped.set('member',String(memberId));scoped.delete('team');
+  const f=filters(scoped,{candidates:true}),scope=params.get('match_scope')==='other'?'other':'court',limit=20;
+  const counts=store.get(`SELECT COUNT(*) total,COALESCE(SUM(m.friend_count>=3),0) court,COALESCE(SUM(m.friend_count<3),0) other FROM matches m WHERE ${f.sql}`,...f.args);
+  const total=counts[scope],pages=Math.max(1,Math.ceil(total/limit)),requested=Number(params.get('match_page'));
+  const page=Math.min(pages,Number.isSafeInteger(requested)&&requested>0?requested:1);
+  const items=store.all(`SELECT m.id,m.end_time,m.duration,m.map_id,m.mode,m.friend_count,m.detail_state,
+    CASE WHEN COUNT(*)=COUNT(r.won) AND COUNT(*)=COUNT(r.team_id) AND COUNT(DISTINCT r.team_id)=1 AND COUNT(DISTINCT r.won)=1 THEN MIN(r.won) END won,
+    SUM(r.rating_delta) rating_delta,SUM(r.destruction) destruction,SUM(r.losses) losses
+    FROM matches m JOIN registered_participants r ON r.match_id=m.id AND r.member_id=?
+    WHERE ${f.sql} AND m.friend_count${scope==='court'?'>=3':'<3'} GROUP BY m.id
+    ORDER BY m.end_time DESC,CAST(m.id AS INTEGER) DESC LIMIT ? OFFSET ?`,Number(memberId),...f.args,limit,(page-1)*limit);
+  for(const item of items){item.map=mapName(item.map_id);item.accounts=store.all('SELECT player_id,name FROM registered_participants WHERE match_id=? AND member_id=? ORDER BY player_id',item.id,Number(memberId));}
+  return {scope,items,total,page,pages,counts};
 }

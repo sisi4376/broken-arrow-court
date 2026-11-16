@@ -19,7 +19,8 @@ New-Item -ItemType Directory -Path $build -Force | Out-Null
 $files = @{}
 foreach ($folder in @('src', 'scripts', 'public', 'readonly', 'test')) {
     foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root $folder) -File -Recurse) {
-        if ($file.Extension -notin @('.mjs', '.ps1', '.js', '.css', '.svg', '.html') -and $file.Name -ne 'LUCIDE-LICENSE') { continue }
+        $isUnitIcon = $file.Extension -eq '.png' -and $file.DirectoryName -in @((Join-Path $root 'public/unit-icons'), (Join-Path $root 'public/medal-icons'))
+        if ($file.Extension -notin @('.mjs', '.ps1', '.js', '.css', '.svg', '.html') -and $file.Name -ne 'LUCIDE-LICENSE' -and -not $isUnitIcon) { continue }
         $relative = $file.FullName.Substring($root.Length + 1).Replace('\', '/')
         $files[$relative] = $file.FullName
     }
