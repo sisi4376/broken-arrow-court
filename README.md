@@ -6,7 +6,7 @@
 
 **打完别急着散，先来开个庭。**
 
-给 Broken Arrow 固定开黑队的一本战绩账：归档对局、对比队友、追查补给。<br>把有据可查的赛后争论，变成朋友间的快乐庭审。
+**面向 Broken Arrow 朋友开黑的可视化战绩与长期数据管理工具。**<br>把对局留在本地，把小队的每一次成长留在档案里。
 
 [![下载安装包](https://img.shields.io/badge/Download-Windows%20EXE-803d33?style=flat-square)](https://github.com/sisi4376/broken-arrow-court/releases/latest) ![Windows 10 / 11 x64](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-315d57?style=flat-square) ![内置 Node.js](https://img.shields.io/badge/Node.js-内置运行时-52744a?style=flat-square)
 
@@ -19,6 +19,14 @@
 ![开庭模式下的审判大厅：开黑概览、地图分布与对局卷宗](docs/images/court-overview.png)
 
 <p align="center"><sub>真实程序界面 · 截图使用虚构测试账号与样例对局 · 开庭模式可随时切换</sub></p>
+
+## 给你们的开黑，留一份长期档案
+
+相比直接在 BATrace 上查看战绩，法庭会将已经获取的对局数据归档到**本地 SQLite 数据库**。持续同步、保留并备份本地档案，就能逐步积累更久远的对局记录；即使某场旧对局日后无法再从上游查询，已经成功保存的内容仍可用于查看和分析。
+
+随着档案积累，你可以按不同日期范围查看小队的胜率、分数交换、补给、专精组合和地图表现，从一晚的赛后复盘，延伸到跨月、跨版本的长期分析。一位朋友的多个游戏账号也能合并管理，让小队的历史保持连贯。
+
+**越早开始记录，就能为以后的复盘留下越长的时间线。** 首次安装能回溯多远，仍取决于上游当时可提供的数据；本地归档不能恢复从未获取且上游已不可用的记录。
 
 ## 这局到底谁在蘸饭？
 
