@@ -1,6 +1,6 @@
-<div align="center">
+![断剑蘸饭审判法庭宣传图：战术沙盘上的法庭，开黑复盘、对局档案与趣味庭审](docs/images/promo-banner.png)
 
-<img src="public/favicon.svg" width="72" height="72" alt="法庭天平标志">
+<div align="center">
 
 # 断剑蘸饭审判法庭
 
