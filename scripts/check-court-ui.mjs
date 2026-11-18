@@ -34,22 +34,23 @@ try{
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   page.on('response',r=>{if(r.status()>=400)errors.push(`${r.status()} ${r.url()}`);});
   await page.goto(url);await page.getByLabel('登录名',{exact:true}).fill('court-ui-owner');await page.getByLabel('密码',{exact:true}).fill('court-ui-test-password');await page.getByRole('button',{name:'登录',exact:true}).click();
-  await page.getByRole('heading',{name:'法庭总览',exact:true}).waitFor();
-  await page.getByRole('button',{name:'开庭',exact:true}).click();
   await page.getByRole('heading',{name:'审判大厅',exact:true}).waitFor();
+  assert.equal(await page.locator('[data-action="toggle-court-mode"]').count(),0);
   assert.equal(app.store.settings().court_mode,true);
   await page.screenshot({path:path.join(out,'court-dashboard-desktop.png'),fullPage:true});
   for(const [route,label]of [['members','看守所'],['matches','对局卷宗'],['sync','书记官室']]){
     await page.locator(`nav a[href="#${route}"]`).click();await page.getByRole('heading',{name:label,exact:true}).waitFor();
     if(route==='members')assert.equal(await page.locator('.member-heading h2 a[href="#friend/2"]').textContent(),'朋友与账号');
-    if(route==='sync')await page.getByRole('heading',{name:'开庭模式',exact:true}).waitFor();
+    if(route==='sync'){
+      assert.equal(await page.locator('.court-mode-panel').count(),0);
+      assert.equal(await page.locator('#source-provider-settings select').inputValue(),'official');
+      assert.equal(await page.locator('#source-provider-settings option[value="batrace"]').evaluate(el=>el.disabled),true);
+    }
   }
   await page.screenshot({path:path.join(out,'court-settings-desktop.png'),fullPage:true});
-  await page.getByRole('button',{name:'休庭，恢复常规界面',exact:true}).click();await page.getByRole('heading',{name:'数据管理',exact:true}).waitFor();
-  await page.reload();await page.getByRole('heading',{name:'数据管理',exact:true}).waitFor();
-  assert.equal(await page.locator('html').getAttribute('data-court-mode'),'off');
-  await page.getByRole('button',{name:'开庭，启用法庭界面',exact:true}).click();await page.getByRole('heading',{name:'书记官室',exact:true}).waitFor();
+  app.store.setting('court_mode',false);
   await page.reload();await page.getByRole('heading',{name:'书记官室',exact:true}).waitFor();
+  assert.equal(await page.locator('html').getAttribute('data-court-mode'),'on');
   await page.goto(url+'/#match/800');await page.getByRole('button',{name:'当庭对质',exact:true}).waitFor();
   await page.getByRole('button',{name:'证据清单',exact:true}).waitFor();
   await page.screenshot({path:path.join(out,'court-case-desktop.png'),fullPage:true});
@@ -128,7 +129,7 @@ try{
   assert(await publicSelf.locator('.self-unit-list').first().evaluate(el=>el.scrollWidth<=el.clientWidth+1),'unit details overflow their mobile container');
   await viewer.screenshot({path:path.join(out,'court-charges-mobile.png')});
   app.store.setting('court_mode',false);await exportStatic(app.store,{directory:app.staticDirectory});
-  await viewer.goto(url+'/readonly/');await viewer.getByRole('heading',{name:'法庭总览',exact:true}).waitFor();
-  assert.equal(await viewer.locator('html').getAttribute('data-court-mode'),'off');
-  assert.deepEqual(errors,[]);console.log(JSON.stringify({ok:true,screenshots:out,checks:['admin toggles','persistence','authored copy only','all routes on mobile','read-only server mode','read-only no controls','both themes','no browser errors']},null,2));
+  await viewer.goto(url+'/readonly/');await viewer.getByRole('heading',{name:'审判大厅',exact:true}).waitFor();
+  assert.equal(await viewer.locator('html').getAttribute('data-court-mode'),'on');
+  assert.deepEqual(errors,[]);console.log(JSON.stringify({ok:true,screenshots:out,checks:['permanent court UI','legacy setting compatibility','authored copy only','all routes on mobile','read-only court UI','no theme controls','no browser errors']},null,2));
 }finally{await browser?.close();await app.close();}

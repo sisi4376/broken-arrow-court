@@ -132,7 +132,7 @@ export class Store {
     catch (error) { this.db.exec(depth ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : 'ROLLBACK'); throw error; }
     finally { this.transactionDepth = depth; }
   }
-  settings() { return Object.fromEntries(this.all('SELECT key,value FROM settings').map((x) => [x.key, JSON.parse(x.value)])); }
+  settings() { return { ...Object.fromEntries(this.all('SELECT key,value FROM settings').map((x) => [x.key, JSON.parse(x.value)])), court_mode: true }; }
   setting(key, value) { this.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', key, JSON.stringify(value)); }
   audit(user, action, details) { this.run('INSERT INTO audit_events(user_id,action,details,created_at) VALUES(?,?,?,?)', user, action, JSON.stringify(details), now()); }
   event(run, level, message) { this.run('INSERT INTO sync_events(run_id,level,message,created_at) VALUES(?,?,?,?)', run, level, message, now()); }

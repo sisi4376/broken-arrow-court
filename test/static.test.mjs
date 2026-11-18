@@ -79,14 +79,14 @@ test('version caches survive a reader reload, remain optional and refresh withou
   changed.members[0].name='Mutated';assert.equal((await second.request('/api/dashboard?mode=0')).members[0].name,'Fresh name');
 });
 
-test('court mode alone triggers publication and read-only readers follow the server setting',async t=>{
+test('court UI stays enabled in exports despite legacy disabled settings',async t=>{
   const s=fixture(t),dir=path.join(s.directory,'court-mode-site');
   const pub=new Publication(s,{directory:dir});await pub.run();
   const reader=await openReader(dir);
-  assert.equal((await reader.request('/api/session')).ui.court_mode,false);
+  assert.equal((await reader.request('/api/session')).ui.court_mode,true);
   s.setting('court_mode',true);
-  assert.equal((await pub.run()).changed,true);
-  assert.equal(await reader.hasUpdate(),true);
+  assert.equal((await pub.run()).changed,false);
+  assert.equal(await reader.hasUpdate(),false);
   await reader.refresh();
   assert.equal((await reader.request('/api/session')).ui.court_mode,true);
   assert.equal((await reader.request('/api/sync/status')).settings.court_mode,true);
@@ -94,8 +94,8 @@ test('court mode alone triggers publication and read-only readers follow the ser
   assert.deepEqual(manifest.ui,{court_mode:true});
   assert(!('settings' in manifest));
   assert.equal((await pub.run()).changed,false);
-  s.setting('court_mode',false);assert.equal((await pub.run()).changed,true);
-  await reader.refresh();assert.equal((await reader.request('/api/session')).ui.court_mode,false);
+  s.setting('court_mode',false);assert.equal((await pub.run()).changed,false);
+  await reader.refresh();assert.equal((await reader.request('/api/session')).ui.court_mode,true);
 });
 
 test('public snapshot includes registered personal games but excludes unrelated games, credentials and private fields',async t=>{

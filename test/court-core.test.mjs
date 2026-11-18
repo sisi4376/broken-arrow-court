@@ -123,7 +123,7 @@ test('v6 UI presents signed points and ceilings without calling adjustments perc
   const ui=createCourt({S:{},esc,icon:()=>'',fmt:n=>n==null?'—':String(n),empty:()=>''});
   const panel=ui.courtPanel({model:data.model,min_games:5,report:r});
   assert(panel.includes('±10分'));assert(panel.includes('+8分'));assert(panel.includes('裁剪前'));assert(panel.includes('核心'));
-  assert(panel.includes('构造测试，不是任何朋友的真实数据'));assert(panel.includes('href="#match/800"'));
+  assert(panel.includes('构造测试，不是任何被告的真实数据'));assert(panel.includes('href="#match/800"'));
   assert(!panel.includes('20%'));assert(!panel.includes('/ 75'));
   for(const html of [ui.courtView(data),ui.courtView(zhanfanComparison(s))]){
     assert(html.includes('&lt;script&gt;'));assert(!html.includes('<script>'));assert(!html.includes('NaN'));assert(!html.includes('undefined'));

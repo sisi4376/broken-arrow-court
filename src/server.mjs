@@ -68,7 +68,8 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
   let onShutdown = null;
   let storageCache=null;
   function changeSource(provider){
-    assert(Object.hasOwn(SOURCE_PROVIDERS,provider),400,'请选择 BATrace 或官方上游');
+    assert(Object.hasOwn(SOURCE_PROVIDERS,provider),400,'请选择官方上游');
+    assert(!SOURCE_PROVIDERS[provider].disabled,400,'BATrace 数据源暂时冻结，请使用官方上游');
     assert(!engine.active&&!source.inflight.size&&!source.reports?.inflight.size,409,'当前有数据请求进行中，请等待结束再切换');
     const previous=sourceProvider(store);store.setting('source_provider',provider);
     try{source=createSource(store,sourceOptions);engine.source=source;engine.pending=null;}
@@ -395,8 +396,7 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
           assert(value===undefined||(Number.isInteger(value)&&value>=1&&value<=max),400,`请求上限必须为 1 至 ${max} 的整数`);
         }
         if (body.court_mode !== undefined) {
-          assert(typeof body.court_mode === 'boolean',400,'开庭模式必须为布尔值');
-          store.setting('court_mode',body.court_mode);
+          assert(body.court_mode === true,400,'法庭界面已固定启用，不再支持切换');
         }
         assert(body.sync_minutes===undefined,400,'同步频率已改为北京时间分时调度，请刷新页面后保存设置');
         if (body.request_delay_ms!==undefined) { assert(Number.isInteger(body.request_delay_ms)&&body.request_delay_ms>=1000&&body.request_delay_ms<=60000,400,'请求间隔需为 1000 至 60000 毫秒'); store.setting('request_delay_ms',body.request_delay_ms); }

@@ -31,7 +31,7 @@ export async function desktopStatus(root, { checkTools = false, run = runCommand
   const url = localUrl(state.url) || `http://127.0.0.1:${/^\d{1,5}$/.test(env.PORT || '') ? env.PORT : '4317'}`;
   let running = false;
   if (localUrl(state.url)) try { running = (await fetcher(url + '/api/health', { signal: AbortSignal.timeout(2000) })).ok; } catch {}
-  let friends = 0, matches = 0, databaseIssue = null, db, lastSync = null, syncEnabled = null, traffic = null,provider='batrace';
+  let friends = 0, matches = 0, databaseIssue = null, db, lastSync = null, syncEnabled = null, traffic = null,provider='official';
   try {
     db = new DatabaseSync(path.join(data, 'court.sqlite'), { readOnly: true });
     friends = db.prepare('SELECT COUNT(*) n FROM members WHERE active=1').get().n;
@@ -39,7 +39,7 @@ export async function desktopStatus(root, { checkTools = false, run = runCommand
     lastSync = db.prepare('SELECT status,started_at,finished_at FROM sync_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1').get()??null;
     const setting=db.prepare("SELECT value FROM settings WHERE key='sync_enabled'").get();
     syncEnabled=setting?json(setting.value,false)===true:false;
-    provider=json(db.prepare("SELECT value FROM settings WHERE key='source_provider'").get()?.value??'"batrace"','batrace');
+    provider='official';
     const reader={get:(sql,...args)=>db.prepare(sql).get(...args),all:(sql,...args)=>db.prepare(sql).all(...args),settings:()=>Object.fromEntries(db.prepare("SELECT key,value FROM settings WHERE key LIKE 'request_limit_%'").all().map(row=>[row.key,json(row.value)]))};
     if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_requests'").get()){
       const m=requestMonitor(reader,(env.SOURCE_BASE_URL||'https://dash.batrace.top').replace(/\/$/,''));
@@ -78,7 +78,8 @@ export async function desktopStatus(root, { checkTools = false, run = runCommand
 }
 
 export async function saveSourceProvider(root,provider,{fetcher=fetch}={}){
-  if(!Object.hasOwn(SOURCE_PROVIDERS,provider))throw Error('请选择 BATrace 或官方上游');
+  if(!Object.hasOwn(SOURCE_PROVIDERS,provider))throw Error('请选择官方上游');
+  if(SOURCE_PROVIDERS[provider].disabled)throw Error('BATrace 数据源暂时冻结，请使用官方上游');
   const env=parseEnv(await optional(path.join(root,'.env'))),data=path.resolve(root,env.DATA_DIR||'data'),state=json(await optional(path.join(data,'service.json'))),url=localUrl(state.url);
   let running=false;if(url)try{running=(await fetcher(url+'/api/health',{signal:AbortSignal.timeout(2000)})).ok;}catch{}
   if(running){const response=await fetcher(url+'/api/service/source',{method:'POST',headers:{'Content-Type':'application/json','X-Service-Token':state.shutdown_token},body:JSON.stringify({provider}),signal:AbortSignal.timeout(5000)});if(!response.ok)throw Error('数据源切换失败，请等待当前请求结束或重启后台后重试');}

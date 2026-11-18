@@ -114,8 +114,8 @@ test('statistics queries and CSV are admin-only, while source switching is persi
   const result=await owner.request('/api/source/statistics?from=2026-10-01&to=2026-10-27&group=month');assert.equal(result.status,200);assert.equal(result.data.summary.requests,10);assert.equal(result.data.rows.length,1);
   assert.equal((await owner.request('/api/source/statistics?from=2026-02-30')).status,400);
   assert.equal((await owner.request('/api/source/provider','POST',{provider:'official'})).status,200);assert.equal(app.source.provider,'official');assert.equal(app.engine.source,app.source);assert.equal(app.store.settings().source_provider,'official');assert.equal(app.store.settings().sync_enabled,false);
-  app.engine.active=Promise.resolve();assert.equal((await owner.request('/api/source/provider','POST',{provider:'batrace'})).status,409);app.engine.active=null;
-  assert.equal((await owner.request('/api/source/provider','POST',{provider:'batrace'})).status,200);assert.equal(app.source.base,'https://dash.batrace.top');assert.equal(app.store.get('SELECT COUNT(*) n FROM source_requests').n,0);
+  app.engine.active=Promise.resolve();assert.equal((await owner.request('/api/source/provider','POST',{provider:'official'})).status,409);app.engine.active=null;
+  assert.equal((await owner.request('/api/source/provider','POST',{provider:'batrace'})).status,400);assert.equal(app.source.provider,'official');assert.equal(app.store.get('SELECT COUNT(*) n FROM source_requests').n,0);
 });
 
 test('lifetime profile reads combine the saved baseline with local matches without contacting the source',async t=>{
@@ -142,13 +142,13 @@ test('request monitoring and its limits are private, persistent, paginated and a
   assert.equal((await friend.request('/api/settings','PATCH',{request_limit_day:1})).status,403);
   assert.equal((await owner.request('/api/settings','PATCH',{request_limit_day:0})).status,400);
   assert.equal((await owner.request('/api/settings','PATCH',{request_limit_day:30,request_limit_hour:20,request_limit_minute:5})).status,200);
-  await assert.rejects(app.source.read('/monitor-test-one'),/404/);
-  app.store.setting('request_delay_ms',0);await assert.rejects(app.source.read('/monitor-test-two'),/404/);
+  await assert.rejects(app.source.read('/user/monitor-test-one'),/404/);
+  app.store.setting('request_delay_ms',0);await assert.rejects(app.source.read('/user/monitor-test-two'),/404/);
   const m=(await owner.request('/api/sync/status')).data.request_monitor;
   assert.equal(m.total,2);assert.equal(m.errors_today,2);assert.equal(m.limits.day,30);assert.equal(m.limits.minute,5);
   const first=(await owner.request('/api/source/requests?limit=1')).data;
   const second=(await owner.request('/api/source/requests?limit=1&before='+first.next_before)).data;
-  assert.equal(first.rows[0].resource,'/monitor-test-two');assert.equal(second.rows[0].resource,'/monitor-test-one');
+  assert.equal(first.rows[0].resource,'/user/monitor-test-two');assert.equal(second.rows[0].resource,'/user/monitor-test-one');
   const page=(await owner.request('/api/source/requests?page=2&page_size=1')).data;
   assert.equal(page.total_rows,2);assert.equal(page.total_pages,2);assert.equal(page.rows[0].id,second.rows[0].id);
   assert.equal((await owner.request('/api/source/requests?page=1')).data.page_size,15);
@@ -202,9 +202,11 @@ test('private backup status and manual cloud backups are restricted to local adm
   assert.equal((await owner.request('/api/backup/cloud','POST',{})).status,202);assert(forced);
 });
 
-test('court UI is server controlled, boolean only, and editable only by admins',async t=>{
+test('court UI is permanent for new installs and legacy settings and cannot be disabled',async t=>{
   const {app,client,base}=await application(t),owner=client(),friend=client(),guest=client();
-  assert.deepEqual((await guest.request('/api/session')).data.ui,{court_mode:false});
+  assert.deepEqual((await guest.request('/api/session')).data.ui,{court_mode:true});
+  app.store.setting('court_mode',false);
+  assert.equal((await guest.request('/api/session')).data.ui.court_mode,true);
   await owner.request('/api/register','POST',{name:'Owner',username:'court-mode-owner',password:'court-mode-password'});await owner.request('/api/session');
   const invite=(await owner.request('/api/invitations','POST',{})).data.code;
   await friend.request('/api/register','POST',{name:'Friend',username:'court-mode-friend',password:'court-mode-password',invite});await friend.request('/api/session');
@@ -216,8 +218,8 @@ test('court UI is server controlled, boolean only, and editable only by admins',
   assert.equal((await friend.request('/api/sync/status')).data.settings.court_mode,true);
   assert.equal((await fetch(base+'/court-ui.js')).status,200);
   assert.equal((await fetch(base+'/court-ui.css')).status,200);
-  await owner.request('/api/settings','PATCH',{court_mode:false});
-  assert.equal((await guest.request('/api/session')).data.ui.court_mode,false);
+  assert.equal((await owner.request('/api/settings','PATCH',{court_mode:false})).status,400);
+  assert.equal((await guest.request('/api/session')).data.ui.court_mode,true);
 });
 
 test('friend analysis is authenticated and deck confirmation enforces ownership and same-country pairs',async t=>{

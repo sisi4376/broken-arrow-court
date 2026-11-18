@@ -1,7 +1,7 @@
 import {SourceClient,SourceError} from './source.mjs';
 import {numericId,parseSearchQuery} from './domain.mjs';
-export const SOURCE_PROVIDERS=Object.freeze({batrace:{label:'BATrace',base:'https://dash.batrace.top'},official:{label:'官方上游（直连）',base:'https://api.brokenarrowgame.tech',reports:'https://s3.brokenarrowgame.tech'}});
-export function sourceProvider(store){const value=store.settings().source_provider??'batrace';if(!Object.hasOwn(SOURCE_PROVIDERS,value))throw Error('未知数据源设置');return value;}
+export const SOURCE_PROVIDERS=Object.freeze({official:{label:'官方上游（直连）',base:'https://api.brokenarrowgame.tech',reports:'https://s3.brokenarrowgame.tech'},batrace:{label:'BATrace（暂时冻结）',base:'https://dash.batrace.top',disabled:true}});
+export function sourceProvider(store){const value=store.settings().source_provider??'official';if(!Object.hasOwn(SOURCE_PROVIDERS,value))throw Error('未知数据源设置');return SOURCE_PROVIDERS[value].disabled?'official':value;}
 export function createSource(store,options={}){return !options.base&&sourceProvider(options.monitorStore??store)==='official'?new OfficialSource(store,options):new SourceClient(store,options);}
 export class OfficialSource extends SourceClient{
   constructor(store,options={}){
@@ -48,7 +48,7 @@ export class OfficialSource extends SourceClient{
   }
   async detail(id,options={}){return this.report(id,options);}
   async search(input){
-    const query=parseSearchQuery(input);if(!/^\d{1,20}$/.test(query))throw new SourceError('官方源请使用游戏数字 ID 或 Steam64；昵称搜索请切换 BATrace');
+    const query=parseSearchQuery(input);if(!/^\d{1,20}$/.test(query))throw new SourceError('官方源请使用游戏数字 ID 或 Steam64；昵称搜索暂不可用');
     const raw=await this.read(`/user/${numericId(query)}${query.length>10?'?steam=true':''}`);
     if(!raw?.id)throw new SourceError('官方玩家资料格式变化');return {players:[{id:raw.id,name:raw.name,steam_id:raw.steamId,rating:raw.rt??raw.rating}]};
   }

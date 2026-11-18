@@ -274,11 +274,11 @@ namespace BrokenArrowCourtDesktop
             syncRow.Controls.Add(Button("查看每日请求统计", () => SelectTab(3), false)); homeLayout.Controls.Add(syncRow);
             scheduleLabel = Status("自动检查时间：待检查", 0); homeLayout.Controls.Add(scheduleLabel);
             var sourceRow = Row(); sourceRow.Controls.Add(new Label { Text = "采集数据源", AutoSize = true, Margin = new Padding(0, 8, 8, 0) });
-            sourceChoice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 }; sourceChoice.Items.AddRange(new object[] { "BATrace", "官方上游（直连）" }); sourceChoice.SelectedIndex = 0;
+            sourceChoice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 }; sourceChoice.Items.AddRange(new object[] { "官方上游（直连）" }); sourceChoice.SelectedIndex = 0;
             sourceChoice.SelectedIndexChanged += (s, e) => { if (!applyingSource) sourceDirty = true; }; sourceRow.Controls.Add(sourceChoice);
             sourceRow.Controls.Add(Button("切换数据源", async () => await ChangeSource()));
             sourceRow.Controls.Add(Button("查看本地空间", async () => { SelectTab(4); await ScanStorage(); }, false)); homeLayout.Controls.Add(sourceRow);
-            homeLayout.Controls.Add(Status("官方源不回退到 BATrace；沿用本地单位目录，缺少的比赛模式保留未知。", 0));
+            homeLayout.Controls.Add(Status("默认官方数据源；BATrace 暂时冻结。沿用本地单位目录。", 0));
             var trafficLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
             trafficLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); trafficLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); trafficLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); traffic.Controls.Add(trafficLayout);
             var queryRow = Row();
@@ -310,9 +310,6 @@ namespace BrokenArrowCourtDesktop
             serviceRow.Controls.Add(Button("重启后台", async () => await Operation("重启后台", Restart)));
             serviceRow.Controls.Add(Button("打开本机管理页", () => OpenUrl(Value("local_url", "http://127.0.0.1:4317")), false));
             serviceRow.Controls.Add(Button("打开只读预览", () => OpenUrl(Value("local_url", "http://127.0.0.1:4317") + "/readonly/"), false)); homeLayout.Controls.Add(serviceRow);
-            var courtRow = Row();
-            courtRow.Controls.Add(Button("开启开庭模式", async () => await Operation("开庭", async () => await Node("scripts/court-mode.mjs", "on"))));
-            courtRow.Controls.Add(Button("恢复常规界面", async () => await Operation("休庭", async () => await Node("scripts/court-mode.mjs", "off")))); homeLayout.Controls.Add(courtRow);
             toolsLabel = new Label { Text = "环境：待检查", AutoSize = true, Margin = new Padding(0, 12, 0, 10) }; homeLayout.Controls.Add(toolsLabel);
             var checks = Row(); checks.Controls.Add(Button("检查环境与部署", async () => await Operation("检查环境与部署", async () => await Refresh(true))));
             checks.Controls.Add(Button("登录 GitHub", Login)); checks.Controls.Add(Button("打开线上网页", () => { if (Value("public_url", "") == "") throw new Exception("尚未配置发布仓库"); OpenUrl(Value("public_url", "")); }, false)); homeLayout.Controls.Add(checks);
@@ -552,7 +549,7 @@ namespace BrokenArrowCourtDesktop
         async Task ChangeSource()
         {
             if (busy || !ready) return; SetBusy(true);
-            try { await Node("scripts/desktop-control.mjs", "source", sourceChoice.SelectedIndex == 1 ? "official" : "batrace"); sourceDirty = false; await Refresh(false); currentLabel.Text = "数据源已切换；自动同步开关保持原状态"; }
+            try { await Node("scripts/desktop-control.mjs", "source", "official"); sourceDirty = false; await Refresh(false); currentLabel.Text = "数据源已切换；自动同步开关保持原状态"; }
             catch (Exception error) { Failure(error); } finally { SetBusy(false); }
         }
         async Task ScanStorage()
@@ -589,7 +586,7 @@ namespace BrokenArrowCourtDesktop
             autoSyncBox.Checked = Value("sync_enabled", "False") == "True";
             autoSyncBox.Text = autoSyncBox.Checked ? "开启自动同步（已开启）" : "开启自动同步（已关闭）";
             autoSyncBox.Enabled = !busy && ready && next.ContainsKey("sync_enabled") && next["sync_enabled"] != null;
-            if (!sourceDirty) { applyingSource = true; sourceChoice.SelectedIndex = Value("source_provider", "batrace") == "official" ? 1 : 0; applyingSource = false; }
+            if (!sourceDirty) { applyingSource = true; sourceChoice.SelectedIndex = 0; applyingSource = false; }
             var schedule = next.ContainsKey("sync_schedule") ? next["sync_schedule"] as Dictionary<string, object> : null;
             if (schedule != null)
             {
@@ -737,10 +734,10 @@ namespace BrokenArrowCourtDesktop
                 var official = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "source", "official" }, root, null);
                 if (official.Code != 0) throw new Exception("Official source selection failed: " + official.Error);
                 var batrace = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "source", "batrace" }, root, null);
-                if (batrace.Code != 0) throw new Exception("BATrace source selection failed: " + batrace.Error);
+                if (batrace.Code == 0) throw new Exception("Frozen BATrace source selection was allowed");
                 state = Bundle.Json.Deserialize<Dictionary<string, object>>(Runner.Run(node, new[] { "scripts/desktop-control.mjs", "status", "--storage" }, root, null).Output);
                 if ((bool)state["sync_enabled"] || state["request_monitor"] == null) throw new Exception("Desktop traffic or saved sync state missing");
-                if (state["storage"] == null || Convert.ToString(state["source_provider"]) != "batrace") throw new Exception("Storage or source status missing");
+                if (state["storage"] == null || Convert.ToString(state["source_provider"]) != "official") throw new Exception("Storage or source status missing");
                 using (var instance = new ManagerInstance(root))
                 using (var form = new ManagerForm(root, true))
                 {

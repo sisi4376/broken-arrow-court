@@ -4,6 +4,14 @@ import {OfficialSource,createSource} from '../src/source-provider.mjs';
 import {requestStatistics} from '../src/request-statistics.mjs';
 import {requestMonitor} from '../src/request-monitor.mjs';
 import {SyncEngine} from '../src/sync.mjs';
+test('official is the default and legacy BATrace selections resolve to official without network work',t=>{
+  const s=testStore(t);let calls=0;
+  const options={fetcher:async()=>{calls++;throw Error('Unexpected network request');}};
+  assert(createSource(s,options) instanceof OfficialSource);
+  s.setting('source_provider','batrace');
+  assert(createSource(s,options) instanceof OfficialSource);
+  assert.equal(calls,0);
+});
 test('official provider reads one ID window, reuses archived games and fetches a new raw report only once across accounts',async t=>{
   const s=testStore(t);s.setting('request_delay_ms',0);s.setting('source_provider','official');member(s,'A',[101]);member(s,'B',[102]);
   const known=rawMatch();s.ingest('800',known,1);s.ingest('800',known,2);

@@ -116,7 +116,7 @@ test('v7 UI exposes item150 and weighted limits90/60, and distinguishes raw core
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const ui=createCourt({S:{},esc,icon:()=>'',fmt:(n,d=0)=>n==null?'—':String(Number(n.toFixed(d))),empty:()=>''});
   const panel=ui.courtPanel({model:data.model,min_games:5,report:r});
-  for(const text of ['罚分100/150',' / 90',' / 60','核心单局 125 / 150','裁剪前','96','不是任何朋友的真实数据'])assert(panel.includes(text),text);
+  for(const text of ['罚分100/150',' / 90',' / 60','核心单局 125 / 150','裁剪前','96','不是任何被告的真实数据'])assert(panel.includes(text),text);
   for(const html of [panel,ui.courtView(data),ui.courtView(zhanfanComparison(s))]){
     assert(!html.includes('NaN'));assert(!html.includes('undefined'));assert(!html.includes('<script>'));assert(html.includes('zhanfan-v7-overcap'));
   }
