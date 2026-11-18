@@ -1,21 +1,24 @@
 import { DatabaseSync, backup } from 'node:sqlite';
 import { mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash,randomBytes } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { normalizeMatch } from './domain.mjs';
+import {BUILD_POLICY,effectiveSettings} from './distribution.mjs';
 
 export const now = () => new Date().toISOString();
 export const digest = (text) => createHash('sha256').update(text).digest('hex');
 
 export class Store {
-  constructor(directory) {
+  constructor(directory, {policy=BUILD_POLICY} = {}) {
+    this.policy=policy;
     this.directory = path.resolve(directory);
     mkdirSync(this.directory, { recursive: true });
     this.file = path.join(this.directory, 'court.sqlite');
     this.db = new DatabaseSync(this.file);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     this.migrate();
+    if(this.policy.fixed&&!this.settings().release_schedule_seed)this.setting('release_schedule_seed',randomBytes(32).toString('hex'));
   }
   migrate() {
     const version = this.db.prepare('PRAGMA user_version').get().user_version;
@@ -132,7 +135,7 @@ export class Store {
     catch (error) { this.db.exec(depth ? `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}` : 'ROLLBACK'); throw error; }
     finally { this.transactionDepth = depth; }
   }
-  settings() { return { ...Object.fromEntries(this.all('SELECT key,value FROM settings').map((x) => [x.key, JSON.parse(x.value)])), court_mode: true }; }
+  settings() { return { ...effectiveSettings(Object.fromEntries(this.all('SELECT key,value FROM settings').map((x) => [x.key, JSON.parse(x.value)])),this.policy), court_mode:true,distribution:{edition:this.policy.edition,fixed:this.policy.fixed,sync_cooldown_ms:this.policy.sync_cooldown_ms} }; }
   setting(key, value) { this.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', key, JSON.stringify(value)); }
   audit(user, action, details) { this.run('INSERT INTO audit_events(user_id,action,details,created_at) VALUES(?,?,?,?)', user, action, JSON.stringify(details), now()); }
   event(run, level, message) { this.run('INSERT INTO sync_events(run_id,level,message,created_at) VALUES(?,?,?,?)', run, level, message, now()); }

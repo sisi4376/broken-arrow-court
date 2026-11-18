@@ -1,3 +1,5 @@
+import {createHash} from 'node:crypto';
+import {BUILD_POLICY} from './distribution.mjs';
 const MINUTE = 60000;
 const DAY = 24 * 60 * MINUTE;
 const OFFSET = 8 * 60 * MINUTE;
@@ -8,8 +10,16 @@ const slots = [
   ...Array.from({length:24},(_,i)=>20*60+i*10),
 ];
 
-export function syncSchedule(at=Date.now()) {
+export function syncSchedule(at=Date.now(),policy=BUILD_POLICY,seed='') {
   const day=Math.floor((at+OFFSET)/DAY)*DAY-OFFSET;
+  if(policy.fixed){
+    const date=new Date(day+OFFSET).toISOString().slice(0,10);
+    const randomSlot=(start,index)=>start+policy.random_windows[index][0]*60*MINUTE+(createHash('sha256').update(seed+':'+new Date(start+OFFSET).toISOString().slice(0,10)+':'+index).digest().readUInt32BE(0)%3541)*1000;
+    const today=policy.random_windows.map((_,i)=>randomSlot(day,i));
+    const candidates=[...policy.random_windows.map((_,i)=>randomSlot(day-DAY,i)),...today,...policy.random_windows.map((_,i)=>randomSlot(day+DAY,i))];
+    const slot=candidates.findLast(value=>value<=at),next=candidates.find(value=>value>at);
+    return {timezone:'Asia/Shanghai',random:true,description:'每天 02:00–03:00、14:00–15:00 各随机一次',date,day_hours:[2,14],random_windows:policy.random_windows,current_minutes:null,slot_started_at:new Date(slot).toISOString(),next_slot_at:new Date(next).toISOString(),slot_expires_at:new Date(slot+60000).toISOString()};
+  }
   const minute=(at-day)/MINUTE;
   const index=slots.findLastIndex(slot=>slot<=minute);
   const slot=day+slots[index]*MINUTE;
@@ -22,8 +32,8 @@ export function syncSchedule(at=Date.now()) {
   return {...SYNC_SCHEDULE,current_minutes:fast?10:null,slot_started_at:new Date(slot).toISOString(),next_slot_at:new Date(next).toISOString(),slot_expires_at:new Date(slot+window*MINUTE).toISOString()};
 }
 
-export function syncIsDue(lastStarted,at=Date.now()) {
+export function syncIsDue(lastStarted,at=Date.now(),policy=BUILD_POLICY,seed='') {
   const last=Date.parse(lastStarted??'');
-  const schedule=syncSchedule(at);
+  const schedule=syncSchedule(at,policy,seed);
   return at<Date.parse(schedule.slot_expires_at)&&(!Number.isFinite(last)||last<Date.parse(schedule.slot_started_at));
 }

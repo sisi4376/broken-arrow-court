@@ -1,7 +1,9 @@
 import {SourceClient,SourceError} from './source.mjs';
 import {numericId,parseSearchQuery} from './domain.mjs';
-export const SOURCE_PROVIDERS=Object.freeze({official:{label:'官方上游（直连）',base:'https://api.brokenarrowgame.tech',reports:'https://s3.brokenarrowgame.tech'},batrace:{label:'BATrace（暂时冻结）',base:'https://dash.batrace.top',disabled:true}});
-export function sourceProvider(store){const value=store.settings().source_provider??'official';if(!Object.hasOwn(SOURCE_PROVIDERS,value))throw Error('未知数据源设置');return SOURCE_PROVIDERS[value].disabled?'official':value;}
+import {BUILD_POLICY} from './distribution.mjs';
+export const sourceProviders=(policy=BUILD_POLICY)=>({official:{label:'官方上游（直连）',base:'https://api.brokenarrowgame.tech',reports:'https://s3.brokenarrowgame.tech'},batrace:{label:policy.fixed?'BATrace（暂时冻结）':'BATrace',base:'https://dash.batrace.top',disabled:policy.fixed}});
+export const SOURCE_PROVIDERS=Object.freeze(sourceProviders());
+export function sourceProvider(store){const value=store.settings().source_provider??'official',providers=sourceProviders(store.policy);if(!Object.hasOwn(providers,value))throw Error('未知数据源设置');return providers[value].disabled?'official':value;}
 export function createSource(store,options={}){return !options.base&&sourceProvider(options.monitorStore??store)==='official'?new OfficialSource(store,options):new SourceClient(store,options);}
 export class OfficialSource extends SourceClient{
   constructor(store,options={}){

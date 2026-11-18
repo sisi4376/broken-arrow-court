@@ -20,6 +20,7 @@ test-results/
 .DS_Store
 .desktop/
 /BrokenArrowCourt*.exe
+/.distribution.json
 # Cloudflare development state and local secret files.
 .wrangler/
 .dev.vars

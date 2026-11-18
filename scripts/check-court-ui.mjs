@@ -5,10 +5,11 @@ import { pathToFileURL } from 'node:url';
 import { createApplication, hashPassword } from '../src/server.mjs';
 import { exportStatic } from '../src/static-export.mjs';
 import { member, rawMatch, detailFor, selfDestructionPrices } from '../test/helpers.mjs';
+import {BUILD_POLICY,RELEASE_POLICY} from '../src/distribution.mjs';
 
-const out=path.resolve('.cache/court-ui');mkdirSync(out,{recursive:true});
+const out=path.resolve(process.argv.includes('--release')?'.cache/court-ui-release':'.cache/court-ui');mkdirSync(out,{recursive:true});
 const directory=mkdtempSync(path.join(out,'data-'));
-const app=createApplication({directory,startScheduler:false,staticOutputDirectory:path.join(directory,'site'),sourceOptions:{fetcher:async()=>new Response('{}',{status:404})}});
+const app=createApplication({directory,policy:process.argv.includes('--release')?RELEASE_POLICY:BUILD_POLICY,startScheduler:false,staticOutputDirectory:path.join(directory,'site'),sourceOptions:{fetcher:async()=>new Response('{}',{status:404})}});
 app.store.setting('sync_enabled',false);
 member(app.store,'院长',[101]);member(app.store,'朋友与账号',[102]);member(app.store,'后勤科长',[103]);member(app.store,'空降薯条',[104]);
 selfDestructionPrices(app.store);
@@ -44,7 +45,15 @@ try{
     if(route==='sync'){
       assert.equal(await page.locator('.court-mode-panel').count(),0);
       assert.equal(await page.locator('#source-provider-settings select').inputValue(),'official');
-      assert.equal(await page.locator('#source-provider-settings option[value="batrace"]').evaluate(el=>el.disabled),true);
+      assert.equal(await page.locator('#source-provider-settings option[value="batrace"]').evaluate(el=>el.disabled),app.store.policy.fixed);
+      assert.equal(await page.locator('#sync-settings input[name="delay"]').isDisabled(),app.store.policy.fixed);
+      if(app.store.policy.fixed){
+        assert.equal(await page.locator('#sync-settings input[name="delay"]').inputValue(),'2000');
+        assert.equal(await page.locator('#request-settings input[name="minute"]').inputValue(),'40');
+        assert.equal(await page.locator('#request-settings input[name="hour"]').inputValue(),'100');
+        assert.equal(await page.locator('#request-settings input[name="day"]').inputValue(),'1000');
+        assert((await page.locator('#sync-settings').innerText()).includes('随机一次'));
+      }
     }
   }
   await page.screenshot({path:path.join(out,'court-settings-desktop.png'),fullPage:true});

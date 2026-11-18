@@ -24,7 +24,7 @@ test('network attempts persist before sending, retries and failures count, cache
 test('shared persistent limits block independent clients and survive restart without sending',async t=>{
   const s=testStore(t);s.setting('request_delay_ms',0);s.setting('request_limit_minute',2);let sent=0;
   const options={base:'https://audit.example',fetcher:async()=>{sent++;return Response.json({});}};
-  const reopened=new Store(s.directory);
+  const reopened=new Store(s.directory,{policy:s.policy});
   try {
   const a=new SourceClient(s,options),b=new SourceClient(reopened,options);
   await Promise.all([a.read('/first'),b.read('/second')]);

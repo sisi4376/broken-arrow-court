@@ -1,4 +1,4 @@
-param([string]$NodePath, [string]$Output = 'BrokenArrowCourt.exe')
+param([string]$NodePath, [string]$Output = 'BrokenArrowCourt.exe', [ValidateSet('release','local')][string]$Edition = 'release')
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Set-Location -LiteralPath $root
@@ -17,6 +17,9 @@ if (-not $outputPath.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [Stri
 $build = Join-Path $root ('.cache/desktop-build/' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $build -Force | Out-Null
 $files = @{}
+$editionPath = Join-Path $build 'distribution.json'
+[IO.File]::WriteAllText($editionPath, ('{"edition":"' + $Edition + '"}'), (New-Object Text.UTF8Encoding($false)))
+$files['.distribution.json'] = $editionPath
 foreach ($folder in @('src', 'scripts', 'public', 'readonly', 'test')) {
     foreach ($file in Get-ChildItem -LiteralPath (Join-Path $root $folder) -File -Recurse) {
         $isUnitIcon = $file.Extension -eq '.png' -and $file.DirectoryName -in @((Join-Path $root 'public/unit-icons'), (Join-Path $root 'public/medal-icons'))

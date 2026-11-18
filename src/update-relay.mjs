@@ -43,12 +43,12 @@ export class UpdateRelay {
       if (this.engine.active || this.stopped) return;
       const started = this.store.transaction(() => {
         const at = this.clock();
-        const nextAllowedAt = Number(this.store.settings().remote_update_next_allowed_at) || 0;
+        const nextAllowedAt = Math.max(Number(this.store.settings().remote_update_next_allowed_at)||0,this.engine.cooldown?.(at).next_allowed_at||0);
         if (at < nextAllowedAt) {
           this.store.setting(key, { result: 'cooldown', next_allowed_at: nextAllowedAt });
           return false;
         }
-        const next = at + UPDATE_REQUEST_INTERVAL_MS;
+        const next = at + (this.store.policy?.sync_cooldown_ms||UPDATE_REQUEST_INTERVAL_MS);
         // Reserve the global window and create the run/receipt in one transaction.
         // It survives restarts and does not depend on browser-side throttling.
         this.store.setting('remote_update_next_allowed_at', next);
@@ -69,6 +69,7 @@ export class UpdateRelay {
     if (!receipt.result) {
       const run = this.store.get('SELECT status FROM sync_runs WHERE id=?', receipt.run_id);
       while (this.engine.active) await this.engine.active;
+      receipt.next_allowed_at=Math.max(receipt.next_allowed_at||0,this.engine.cooldown?.().next_allowed_at||0);
       await this.publication.tick({ forcePush: true });
       while (this.publication.active) await this.publication.active;
       const publication = await this.publication.status();
@@ -76,7 +77,7 @@ export class UpdateRelay {
       this.store.setting(key, receipt);
     }
     await this.call('/ack', { id: request.id, status: receipt.result, next_allowed_at: receipt.next_allowed_at || 0 });
-    const message = receipt.result === 'complete' ? '同步及网页发布已完成' : receipt.result === 'cooldown' ? '全站 10 分钟冷却中，本次请求不重复采集' : '任务未完整完成，请检查同步与发布日志';
+    const message = receipt.result === 'complete' ? '同步及网页发布已完成' : receipt.result === 'cooldown' ? '更新请求冷却中，本次请求不重复采集' : '任务未完整完成，请检查同步与发布日志';
     this.store.event(null, receipt.result === 'failed' ? 'warning' : 'info', `群友更新请求 ${request.id.slice(0, 8)}：${message}`);
   }
   start() { if (!this.url || !this.token) return; this.timer = setInterval(() => this.tick(), 15000); this.timer.unref(); this.tick(); }

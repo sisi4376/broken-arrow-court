@@ -9,6 +9,7 @@ import { requestMonitor } from './request-monitor.mjs';
 import { requestStatistics } from './request-statistics.mjs';
 import { localStorage } from './local-storage.mjs';
 import { SOURCE_PROVIDERS } from './source-provider.mjs';
+import {BUILD_POLICY,effectiveSettings} from './distribution.mjs';
 
 async function optional(file, fallback = '') {
   try { return await readFile(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return fallback; throw e; }
@@ -31,7 +32,7 @@ export async function desktopStatus(root, { checkTools = false, run = runCommand
   const url = localUrl(state.url) || `http://127.0.0.1:${/^\d{1,5}$/.test(env.PORT || '') ? env.PORT : '4317'}`;
   let running = false;
   if (localUrl(state.url)) try { running = (await fetcher(url + '/api/health', { signal: AbortSignal.timeout(2000) })).ok; } catch {}
-  let friends = 0, matches = 0, databaseIssue = null, db, lastSync = null, syncEnabled = null, traffic = null,provider='official';
+  let friends = 0, matches = 0, databaseIssue = null, db, lastSync = null, syncEnabled = null, traffic = null,provider='official',scheduleSeed='';
   try {
     db = new DatabaseSync(path.join(data, 'court.sqlite'), { readOnly: true });
     friends = db.prepare('SELECT COUNT(*) n FROM members WHERE active=1').get().n;
@@ -39,10 +40,12 @@ export async function desktopStatus(root, { checkTools = false, run = runCommand
     lastSync = db.prepare('SELECT status,started_at,finished_at FROM sync_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1').get()??null;
     const setting=db.prepare("SELECT value FROM settings WHERE key='sync_enabled'").get();
     syncEnabled=setting?json(setting.value,false)===true:false;
-    provider='official';
-    const reader={get:(sql,...args)=>db.prepare(sql).get(...args),all:(sql,...args)=>db.prepare(sql).all(...args),settings:()=>Object.fromEntries(db.prepare("SELECT key,value FROM settings WHERE key LIKE 'request_limit_%'").all().map(row=>[row.key,json(row.value)]))};
+    const savedProvider=json(db.prepare("SELECT value FROM settings WHERE key='source_provider'").get()?.value??'"official"','official');
+    provider=SOURCE_PROVIDERS[savedProvider]&&!SOURCE_PROVIDERS[savedProvider].disabled?savedProvider:'official';
+    scheduleSeed=json(db.prepare("SELECT value FROM settings WHERE key='release_schedule_seed'").get()?.value??'""','');
+    const reader={policy:BUILD_POLICY,get:(sql,...args)=>db.prepare(sql).get(...args),all:(sql,...args)=>db.prepare(sql).all(...args),settings:()=>effectiveSettings(Object.fromEntries(db.prepare("SELECT key,value FROM settings WHERE key LIKE 'request_limit_%'").all().map(row=>[row.key,json(row.value)])),BUILD_POLICY)};
     if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_requests'").get()){
-      const m=requestMonitor(reader,(env.SOURCE_BASE_URL||'https://dash.batrace.top').replace(/\/$/,''));
+      const m=requestMonitor(reader,SOURCE_PROVIDERS[provider].base);
       const query=requestStatistics(reader,statistics),today=new Date(Date.now()+8*3600000).toISOString().slice(0,10),current=requestStatistics(reader,{from:today,to:today});
       traffic={today:current.summary.requests,total:m.statistics.summary.requests,bytes_today:current.summary.bytes,unknown_bytes_today:current.summary.unknown_bytes_requests,bytes_total:m.statistics.summary.bytes,pending_today:current.summary.pending,monitored_since:m.monitored_since,daily:query.rows,statistics:query,lifetime:m.statistics.summary};
     }
@@ -54,7 +57,7 @@ export async function desktopStatus(root, { checkTools = false, run = runCommand
     repository, public_url: repository ? `https://${repository.split('/')[0]}.github.io/${repository.split('/')[1]}/` : '',
     interval_minutes: Number(env.PUBLISH_MIN_INTERVAL_MINUTES) || 120,
     friends, matches, database_issue: databaseIssue,
-    last_sync: lastSync, sync_schedule: syncSchedule(),sync_enabled:syncEnabled,request_monitor:traffic,
+    edition:BUILD_POLICY.edition,last_sync:lastSync,sync_schedule:syncSchedule(Date.now(),BUILD_POLICY,scheduleSeed),sync_enabled:syncEnabled,request_monitor:traffic,
     source_provider:provider,source_providers:SOURCE_PROVIDERS,
     exported_at: manifest.published_at || publication.exported_at || null,
     pushed_at: publication.last_push || null, revision: manifest.revision || null,

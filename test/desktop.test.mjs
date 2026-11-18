@@ -6,6 +6,7 @@ import { parseEnv } from 'node:util';
 import { tempDir, member, rawMatch, testStore } from './helpers.mjs';
 import { desktopStatus, savePublicationInterval, saveAutoSync,saveSourceProvider } from '../src/desktop.mjs';
 import { reserveRequest,finishRequest } from '../src/request-monitor.mjs';
+import {BUILD_POLICY} from '../src/distribution.mjs';
 
 test('routine desktop publication bypasses repeat consent while first deployment retains it', async () => {
   const source = await readFile(new URL('../desktop/Manager.cs', import.meta.url), 'utf8');
@@ -79,5 +80,7 @@ test('desktop source selection persists without enabling sync and all-time queri
   const store=testStore(t),root=tempDir(t);await writeFile(path.join(root,'.env'),'DATA_DIR='+store.directory+'\n');store.setting('sync_enabled',false);
   store.run("INSERT INTO sync_runs(id,kind,started_at,requests) VALUES(1,'incremental','2026-10-01T00:00:00Z',10)");store.setting('request_history_cutoff_run_id',1);
   await saveSourceProvider(root,'official');let status=await desktopStatus(root,{statistics:{group:'month',from:'2026-10-01',to:'2026-10-31'}});assert.equal(status.source_provider,'official');assert.equal(status.sync_enabled,false);assert.equal(status.request_monitor.total,10);assert.equal(status.request_monitor.statistics.rows[0].date,'2026-10');
-  await assert.rejects(saveSourceProvider(root,'batrace'),/冻结/);assert.equal(store.settings().source_provider,'official');assert.equal(store.get('SELECT COUNT(*) n FROM source_requests').n,0);await assert.rejects(saveSourceProvider(root,'unknown'));
+  if(BUILD_POLICY.fixed)await assert.rejects(saveSourceProvider(root,'batrace'),/冻结/);
+  else{await saveSourceProvider(root,'batrace');assert.equal(store.settings().source_provider,'batrace');assert.equal((await desktopStatus(root)).source_provider,'batrace');}
+  assert.equal(store.get('SELECT COUNT(*) n FROM source_requests').n,0);await assert.rejects(saveSourceProvider(root,'unknown'));
 });

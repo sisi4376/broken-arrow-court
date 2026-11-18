@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { Store, now, digest } from './db.mjs';
-import { createSource,sourceProvider,SOURCE_PROVIDERS } from './source-provider.mjs';
+import { createSource,sourceProvider,sourceProviders } from './source-provider.mjs';
 import { requestStatistics } from './request-statistics.mjs';
 import { localStorage } from './local-storage.mjs';
 import { SyncEngine } from './sync.mjs';
@@ -53,8 +53,8 @@ async function readBody(req, max = 1024 * 1024) {
   try { return JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch { throw new HttpError(400, 'JSON 格式无效'); }
 }
 
-export function createApplication({ directory = process.env.DATA_DIR || path.join(ROOT, 'data'), sourceOptions, startScheduler = true, shutdownToken = null, staticOutputDirectory } = {}) {
-  const store = new Store(directory);
+export function createApplication({ directory = process.env.DATA_DIR || path.join(ROOT, 'data'), sourceOptions, startScheduler = true, shutdownToken = null, staticOutputDirectory,policy } = {}) {
+  const store = new Store(directory,{policy});
   let source = createSource(store, sourceOptions);
   const engine = new SyncEngine(store, source);
   const staticDirectory = path.resolve(staticOutputDirectory || process.env.STATIC_OUTPUT_DIR || path.join(ROOT, 'site'));
@@ -68,6 +68,7 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
   let onShutdown = null;
   let storageCache=null;
   function changeSource(provider){
+    const SOURCE_PROVIDERS=sourceProviders(store.policy);
     assert(Object.hasOwn(SOURCE_PROVIDERS,provider),400,'请选择官方上游');
     assert(!SOURCE_PROVIDERS[provider].disabled,400,'BATrace 数据源暂时冻结，请使用官方上游');
     assert(!engine.active&&!source.inflight.size&&!source.reports?.inflight.size,409,'当前有数据请求进行中，请等待结束再切换');
@@ -367,9 +368,10 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
         const s = store.settings();
         s.court_mode = s.court_mode === true;
         s.match_query_quiet_enabled = queryQuietEnabled(store);
-        s.sync_schedule = syncSchedule();
+        s.sync_schedule = syncSchedule(Date.now(),store.policy,s.release_schedule_seed);
+        s.sync_cooldown = engine.cooldown();
         s.sync_minutes = s.sync_schedule.current_minutes;
-        s.source_provider=sourceProvider(store);s.source_providers=SOURCE_PROVIDERS;
+        s.source_provider=sourceProvider(store);s.source_providers=sourceProviders(store.policy);
         if (user.role === 'admin') { s.cloud_backup = await cloudBackup.status(); s.publication = await publication.status(); }
         const stats = store.get("SELECT COUNT(*) AS candidates,COALESCE(SUM(friend_count>=3),0) AS qualified,COALESCE(SUM(friend_count>=3 AND detail_state='complete'),0) AS complete,COALESCE(SUM(friend_count>=3 AND detail_state='error'),0) AS detail_errors FROM matches");
         const databaseBytes = ['court.sqlite','court.sqlite-wal'].reduce((sum,name) => { try { return sum+statSync(path.join(store.directory,name)).size; } catch { return sum; } },0);
@@ -385,11 +387,21 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
       }
       if (route === '/api/sync/run' && req.method === 'POST') {
         admin(user); const body=await readBody(req);
+        if(store.policy.fixed){
+          const cooldown=engine.cooldown();
+          if(engine.active)return json(res,{error:'正在调取卷宗，请等待本轮结束'},409);
+          if(cooldown.remaining_ms)return json(res,{...cooldown,error:`调取冷却中，约 ${Math.ceil(cooldown.remaining_ms/60000)} 分钟后可重试`},429);
+        }
         if (body.kind==='full') { source.blockedUntil = Math.max(source.blockedUntil,0); store.run('UPDATE accounts SET next_retry=NULL'); }
-        store.audit(user.id,'sync-request',{kind:body.kind}); return json(res,engine.request(body.kind==='full'?'full':'incremental',{manual:true}),202);
+        const result=engine.request(body.kind==='full'?'full':'incremental',{manual:true});
+        store.audit(user.id,'sync-request',{kind:body.kind});return json(res,result.cooldown?{...result,error:result.message}:result,result.cooldown?429:202);
       }
       if (route === '/api/settings' && req.method === 'PATCH') {
         admin(user); const body=await readBody(req);
+        if(store.policy.fixed){
+          assert(body.request_delay_ms===undefined||body.request_delay_ms===2000,400,'发布版请求间隔固定为 2000 毫秒');
+          for(const [key,value]of Object.entries(store.policy.request_limits))assert(body['request_limit_'+key]===undefined||body['request_limit_'+key]===value,400,'发布版请求额度为固定策略，不能修改');
+        }
         assert(body.match_query_quiet_enabled===undefined||typeof body.match_query_quiet_enabled==='boolean',400,'查询静默开关必须为布尔值');
         for(const [key,max] of [['minute',1000],['hour',10000],['day',100000]]){
           const value=body[`request_limit_${key}`];

@@ -18,6 +18,7 @@ export class SyncEngine {
     this.stopped = false;
     this.current = null;
     this.onIdle = onIdle;
+    if(store.policy?.fixed&&store.get("SELECT COUNT(*) n FROM sync_runs WHERE status='running'").n)this.store.setting('sync_next_allowed_at',Math.max(Number(store.settings().sync_next_allowed_at)||0,Date.now()+store.policy.sync_cooldown_ms));
     store.run("UPDATE sync_runs SET status='interrupted',finished_at=?,message='服务重启，下次从已保存进度继续' WHERE status='running'", now());
   }
   start() {
@@ -34,13 +35,24 @@ export class SyncEngine {
     }
     if (!s.sync_enabled || !this.store.get('SELECT id FROM accounts WHERE active=1 LIMIT 1')) return;
     if (at < this.source.blockedUntil) return;
-    if (syncIsDue(s.last_sync_started,at)) this.request('incremental', { scheduled:true });
+    if (syncIsDue(s.last_sync_started,at,this.store.policy,s.release_schedule_seed)) this.request('incremental', { scheduled:true });
+  }
+  cooldown(at=Date.now()) {
+    const next=this.store.policy?.fixed?Number(this.store.settings().sync_next_allowed_at)||0:0;
+    return {next_allowed_at:next,remaining_ms:Math.max(0,next-at)};
   }
   request(kind = 'incremental', { scheduled=false, manual=false, requestId=null } = {}) {
     if (this.stopped) return { started: false, message: '同步服务已停止' };
+    if(this.store.policy?.fixed){
+      if(this.active)return {started:false,queued:false,message:'正在调取卷宗，请等待本轮结束'};
+      const cooldown=this.cooldown();
+      if(!scheduled&&cooldown.remaining_ms)return {started:false,cooldown:true,...cooldown,message:`调取冷却中，约 ${Math.ceil(cooldown.remaining_ms/60000)} 分钟后可重试`};
+      this.store.setting('sync_next_allowed_at',Date.now()+this.store.policy.sync_cooldown_ms);
+    }
     if (this.active) { this.pendingManual = manual || Boolean(this.pending && this.pendingManual); this.pendingScheduled = this.pending ? this.pendingScheduled && scheduled : scheduled; this.pending = this.pending === 'full' || kind === 'full' ? 'full' : 'incremental'; return { started: false, queued: true }; }
     this.active = this.run(kind, { scheduled, manual, requestId }).catch((error) => this.store.event(null, 'error', error.message)).finally(async () => {
       this.active = null; this.current = null;
+      if(this.store.policy?.fixed)this.store.setting('sync_next_allowed_at',Date.now()+this.store.policy.sync_cooldown_ms);
       if (this.pending && !this.stopped) {
         const next = this.pending, nextScheduled = this.pendingScheduled, nextManual = this.pendingManual;
         this.pending = null; this.pendingManual = false;

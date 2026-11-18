@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {syncSchedule,syncIsDue} from '../src/sync-schedule.mjs';
+import {syncSchedule as schedule,syncIsDue as due} from '../src/sync-schedule.mjs';
+import {LOCAL_POLICY} from '../src/distribution.mjs';
+const syncSchedule=at=>schedule(at,LOCAL_POLICY),syncIsDue=(last,at)=>due(last,at,LOCAL_POLICY);
 import {SyncEngine} from '../src/sync.mjs';
 import {testStore,member} from './helpers.mjs';
 import {Store} from '../src/db.mjs';
@@ -54,7 +56,7 @@ test('automatic tick uses one current slot, skips active paused and cooled-down 
 
 test('persisted crawl pause survives reopening and never resumes at later schedule slots',async t=>{
   const s=testStore(t);member(s,'A',[101]);s.setting('sync_enabled',false);
-  const reopened=new Store(s.directory);let calls=0;
+  const reopened=new Store(s.directory,{policy:s.policy});let calls=0;
   const source={blockedUntil:0,matches:async()=>{calls++;throw Error('Unexpected upstream request');}};
   const engine=new SyncEngine(reopened,source);engine.request=()=>{calls++;};
   try{

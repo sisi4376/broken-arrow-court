@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { gzipSync, gunzipSync } from 'node:zlib';
+import {reserveRequest,finishRequest,requestBases} from './request-monitor.mjs';
 import { extractProfile, extractMatchDetail, numericId, parseSearchQuery } from './domain.mjs';
-import { reserveRequest, finishRequest } from './request-monitor.mjs';
 
 export class SourceError extends Error {
   constructor(message, status = 0, retryAfter = 0) { super(message); this.status = status; this.retryAfter = retryAfter; }
@@ -62,6 +62,10 @@ export class SourceClient {
       if (Date.now() < this.blockedUntil) throw new SourceError('数据源限流冷却中，稍后自动重试', 429, this.blockedUntil - Date.now());
       let lastError;
       for (let attempt = 0; attempt < 3; attempt++) {
+        if(this.monitorStore.policy?.fixed){
+          const bases=requestBases(this.base),row=this.monitorStore.get(`SELECT MAX(started_at) at FROM source_requests WHERE base IN (${bases.map(()=>'?').join(',')})`,...bases);
+          this.lastRequest=Math.max(this.lastRequest,Number(row?.at)||0);
+        }
         const delay = Math.max(0, this.lastRequest + Math.max(Number(this.monitorStore.settings().request_delay_ms ?? 1800),Number(minDelay)||0) - Date.now());
         if (delay) await sleep(delay);
         this.blockedUntil=Math.max(this.blockedUntil,Number(this.monitorStore.settings()[this.cooldownKey])||0,Number(this.monitorStore.settings()[this.budgetKey])||0);

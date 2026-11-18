@@ -5,9 +5,10 @@ import { exportStatic } from '../src/static-export.mjs';
 import { createApplication } from '../src/server.mjs';
 import { tempDir,rawMatch,detailFor,member } from './helpers.mjs';
 import { quietMatchAccounts } from '../src/account-query-policy.mjs';
+import {RELEASE_POLICY,LOCAL_POLICY} from '../src/distribution.mjs';
 
 async function application(t,options={}){
-  let app;const directory=tempDir(t,()=>app?.close());app=createApplication({directory,startScheduler:false,staticOutputDirectory:path.join(directory,'public-site'),sourceOptions:{fetcher:async()=>new Response('{}',{status:404})},...options});
+  let app;const directory=tempDir(t,()=>app?.close());app=createApplication({directory,policy:LOCAL_POLICY,startScheduler:false,staticOutputDirectory:path.join(directory,'public-site'),sourceOptions:{fetcher:async()=>new Response('{}',{status:404})},...options});
   app.store.setting('sync_enabled',false);
   await new Promise((resolve)=>app.server.listen(0,'127.0.0.1',resolve));
   const base=`http://127.0.0.1:${app.server.address().port}`;
@@ -107,7 +108,7 @@ test('desktop auto-sync control requires its local token, persists without start
 });
 
 test('statistics queries and CSV are admin-only, while source switching is persistent, idle-only and never starts network work',async t=>{
-  const {app,client}=await application(t),owner=client(),guest=client();
+  const {app,client}=await application(t,{policy:RELEASE_POLICY}),owner=client(),guest=client();
   assert.equal((await guest.request('/api/source/statistics')).status,401);
   await owner.request('/api/register','POST',{name:'Owner',username:'statistics-owner',password:'statistics-owner-password'});await owner.request('/api/session');
   app.store.run("INSERT INTO sync_runs(id,kind,started_at,requests) VALUES(1,'incremental','2026-10-01T00:00:00Z',10)");app.store.setting('request_history_cutoff_run_id',1);

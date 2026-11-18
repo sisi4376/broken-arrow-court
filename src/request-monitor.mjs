@@ -9,6 +9,7 @@ const HOUR=3600000, DAY=24*HOUR;
 export const sourceDayStart = at => Math.floor((at+8*HOUR)/DAY)*DAY-8*HOUR;
 export const requestBases=base=>['https://api.brokenarrowgame.tech','https://s3.brokenarrowgame.tech'].includes(base)?['https://api.brokenarrowgame.tech','https://s3.brokenarrowgame.tech']:[base];
 export function requestLimits(store) {
+  if(store.policy?.fixed)return {...store.policy.request_limits};
   const s=store.settings();
   return Object.fromEntries(Object.entries(REQUEST_LIMITS).map(([key,fallback])=>{
     const value=s[`request_limit_${key}`];

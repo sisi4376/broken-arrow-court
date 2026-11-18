@@ -110,7 +110,7 @@ namespace BrokenArrowCourtDesktop
             if (name.Contains("\\") || name.StartsWith("/") || name.Split('/').Any(p => p == ".." || p == "." || p.Length == 0)) return false;
             if (name == "__runtime/node.exe" || name == "__runtime/NODE-LICENSE.txt") return true;
             string[] folders = { "src/", "scripts/", "public/", "readonly/", "vendor/", "test/", "desktop/" };
-            string[] files = { "README.md", "package.json", ".env.example", ".gitignore", "Start.ps1", "Stop.ps1", "Install-Autostart.ps1", "Uninstall-Autostart.ps1", "Deploy-GitHubPages.ps1", "Deploy-GitHubPages.cmd", "Publish.ps1", "Publish.cmd" };
+            string[] files = { ".distribution.json", "README.md", "package.json", ".env.example", ".gitignore", "Start.ps1", "Stop.ps1", "Install-Autostart.ps1", "Uninstall-Autostart.ps1", "Deploy-GitHubPages.ps1", "Deploy-GitHubPages.cmd", "Publish.ps1", "Publish.cmd" };
             return folders.Any(name.StartsWith) || files.Contains(name);
         }
         internal static string Target(string root, string name)
@@ -278,7 +278,7 @@ namespace BrokenArrowCourtDesktop
             sourceChoice.SelectedIndexChanged += (s, e) => { if (!applyingSource) sourceDirty = true; }; sourceRow.Controls.Add(sourceChoice);
             sourceRow.Controls.Add(Button("切换数据源", async () => await ChangeSource()));
             sourceRow.Controls.Add(Button("查看本地空间", async () => { SelectTab(4); await ScanStorage(); }, false)); homeLayout.Controls.Add(sourceRow);
-            homeLayout.Controls.Add(Status("默认官方数据源；BATrace 暂时冻结。沿用本地单位目录。", 0));
+            homeLayout.Controls.Add(Status("采集来源以当前版本提供的选项为准；沿用本地单位目录。", 0));
             var trafficLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
             trafficLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); trafficLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); trafficLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); traffic.Controls.Add(trafficLayout);
             var queryRow = Row();
@@ -549,7 +549,7 @@ namespace BrokenArrowCourtDesktop
         async Task ChangeSource()
         {
             if (busy || !ready) return; SetBusy(true);
-            try { await Node("scripts/desktop-control.mjs", "source", "official"); sourceDirty = false; await Refresh(false); currentLabel.Text = "数据源已切换；自动同步开关保持原状态"; }
+            try { await Node("scripts/desktop-control.mjs", "source", sourceChoice.SelectedIndex == 1 ? "batrace" : "official"); sourceDirty = false; await Refresh(false); currentLabel.Text = "数据源已切换；自动同步开关保持原状态"; }
             catch (Exception error) { Failure(error); } finally { SetBusy(false); }
         }
         async Task ScanStorage()
@@ -586,13 +586,14 @@ namespace BrokenArrowCourtDesktop
             autoSyncBox.Checked = Value("sync_enabled", "False") == "True";
             autoSyncBox.Text = autoSyncBox.Checked ? "开启自动同步（已开启）" : "开启自动同步（已关闭）";
             autoSyncBox.Enabled = !busy && ready && next.ContainsKey("sync_enabled") && next["sync_enabled"] != null;
-            if (!sourceDirty) { applyingSource = true; sourceChoice.SelectedIndex = 0; applyingSource = false; }
+            if (!sourceDirty) { applyingSource = true; sourceChoice.Items.Clear(); sourceChoice.Items.Add("官方上游（直连）"); if (Value("edition", "release") == "local") sourceChoice.Items.Add("BATrace"); sourceChoice.SelectedIndex = Value("source_provider", "official") == "batrace" && sourceChoice.Items.Count > 1 ? 1 : 0; applyingSource = false; }
             var schedule = next.ContainsKey("sync_schedule") ? next["sync_schedule"] as Dictionary<string, object> : null;
             if (schedule != null)
             {
                 var hours = schedule["day_hours"] as IEnumerable;
                 string dayHours = hours == null ? "—" : string.Join("、", hours.Cast<object>().Select(hour => Convert.ToInt32(hour).ToString("00") + ":00"));
-                scheduleLabel.Text = "自动检查（北京时间）：白天 " + dayHours + "；" + Convert.ToInt32(schedule["fast_start_hour"]).ToString("00") + ":00～次日 " + Convert.ToInt32(schedule["fast_end_hour"]).ToString("00") + ":00 每 " + schedule["fast_minutes"] + " 分钟\n开关立即保存 · 开启后需保持后台运行";
+                if (schedule.ContainsKey("random") && Convert.ToBoolean(schedule["random"])) scheduleLabel.Text = "自动检查（北京时间）：每天 02:00–03:00、14:00–15:00 各随机一次\n需保持后台运行 · 调取结束后冷却 30 分钟";
+                else scheduleLabel.Text = "自动检查（北京时间）：白天 " + dayHours + "；" + Convert.ToInt32(schedule["fast_start_hour"]).ToString("00") + ":00～次日 " + Convert.ToInt32(schedule["fast_end_hour"]).ToString("00") + ":00 每 " + schedule["fast_minutes"] + " 分钟\n开关立即保存 · 开启后需保持后台运行";
             }
             var monitor = next.ContainsKey("request_monitor") ? next["request_monitor"] as Dictionary<string, object> : null;
             trafficLabel.Text = monitor == null ? "请求统计：暂无监控数据" : "今日可核实请求：" + monitor["today"] + " 次    正文：" + (Convert.ToInt64(monitor["unknown_bytes_today"]) > 0 ? "含历史未知" : Bytes(monitor["bytes_today"])) + "    累计至少：" + monitor["total"] + " 次";
@@ -734,10 +735,11 @@ namespace BrokenArrowCourtDesktop
                 var official = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "source", "official" }, root, null);
                 if (official.Code != 0) throw new Exception("Official source selection failed: " + official.Error);
                 var batrace = Runner.Run(node, new[] { "scripts/desktop-control.mjs", "source", "batrace" }, root, null);
-                if (batrace.Code == 0) throw new Exception("Frozen BATrace source selection was allowed");
+                bool localEdition = Convert.ToString(state["edition"]) == "local";
+                if (localEdition ? batrace.Code != 0 : batrace.Code == 0) throw new Exception("Edition source selection failed");
                 state = Bundle.Json.Deserialize<Dictionary<string, object>>(Runner.Run(node, new[] { "scripts/desktop-control.mjs", "status", "--storage" }, root, null).Output);
                 if ((bool)state["sync_enabled"] || state["request_monitor"] == null) throw new Exception("Desktop traffic or saved sync state missing");
-                if (state["storage"] == null || Convert.ToString(state["source_provider"]) != "official") throw new Exception("Storage or source status missing");
+                if (state["storage"] == null || Convert.ToString(state["source_provider"]) != (localEdition ? "batrace" : "official")) throw new Exception("Storage or source status missing");
                 using (var instance = new ManagerInstance(root))
                 using (var form = new ManagerForm(root, true))
                 {

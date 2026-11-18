@@ -4,8 +4,9 @@ import {OfficialSource,createSource} from '../src/source-provider.mjs';
 import {requestStatistics} from '../src/request-statistics.mjs';
 import {requestMonitor} from '../src/request-monitor.mjs';
 import {SyncEngine} from '../src/sync.mjs';
+import {RELEASE_POLICY} from '../src/distribution.mjs';
 test('official is the default and legacy BATrace selections resolve to official without network work',t=>{
-  const s=testStore(t);let calls=0;
+  const s=testStore(t,{policy:RELEASE_POLICY});let calls=0;
   const options={fetcher:async()=>{calls++;throw Error('Unexpected network request');}};
   assert(createSource(s,options) instanceof OfficialSource);
   s.setting('source_provider','batrace');

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, now } from '../src/db.mjs';
+import {LOCAL_POLICY} from '../src/distribution.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../.cache/tests');
 export function tempDir(t,beforeCleanup=null) {
@@ -9,8 +10,8 @@ export function tempDir(t,beforeCleanup=null) {
   t.after(async()=>{await beforeCleanup?.();const resolved=path.resolve(dir);if(!resolved.startsWith(root+path.sep))throw new Error('Invalid cleanup target');rmSync(resolved,{recursive:true,force:true});});
   return dir;
 }
-export function testStore(t) {
-  let store;const directory=tempDir(t,()=>store?.close());store=new Store(directory);return store;
+export function testStore(t,options={policy:LOCAL_POLICY}) {
+  let store;const directory=tempDir(t,()=>store?.close());store=new Store(directory,options);return store;
 }
 export function member(store,name,players=[]) {
   const id=Number(store.run('INSERT INTO members(name,created_at) VALUES(?,?)',name,now()).lastInsertRowid);
