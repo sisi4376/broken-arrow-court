@@ -10,6 +10,10 @@
 
 [![下载安装包](https://img.shields.io/badge/Download-Windows%20EXE-803d33?style=flat-square)](https://github.com/sisi4376/broken-arrow-court/releases/latest) ![Windows 10 / 11 x64](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-315d57?style=flat-square) ![内置 Node.js](https://img.shields.io/badge/Node.js-内置运行时-52744a?style=flat-square)
 
+### [打开在线演示](https://sisi4376.github.io/broken-arrow-court/)
+
+无需安装或登录。用 156 场虚构对局，体验审判大厅、对局卷宗和庭审分析。
+
 ### [↓ 下载 Windows 一键部署程序](https://github.com/sisi4376/broken-arrow-court/releases/latest/download/BrokenArrowCourt.exe)
 
 [发布说明与校验文件](https://github.com/sisi4376/broken-arrow-court/releases/latest) · [快速上手](#quick-start) · [完整使用手册](https://github.com/sisi4376/broken-arrow-court/blob/master/docs/USER_GUIDE.md) · [反馈问题](https://github.com/sisi4376/broken-arrow-court/issues)
