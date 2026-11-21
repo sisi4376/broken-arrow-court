@@ -14,6 +14,13 @@
 
 [发布说明与校验文件](https://github.com/sisi4376/broken-arrow-court/releases/latest) · [快速上手](#quick-start) · [完整使用手册](https://github.com/sisi4376/broken-arrow-court/blob/master/docs/USER_GUIDE.md) · [反馈问题](https://github.com/sisi4376/broken-arrow-court/issues)
 
+> ⭐ 如果这个项目对你有帮助，欢迎在右上角点一个 **Star**！
+>
+> <img src="https://github.com/user-attachments/assets/5ba8124c-7014-402e-accd-fcd56f582a25" alt="GitHub 右上角 Star 按钮示意" width="120"> ➡️ <img width="136" alt="image" src="https://github.com/user-attachments/assets/9cc68dd4-2d80-4158-8eb6-1483d6cda77c" />
+
+>
+> 你的支持能让更多断箭群友发现这个项目，也是作者持续更新的动力。
+
 </div>
 
 ![审判大厅：开黑概览、地图分布与对局卷宗](docs/images/court-overview.png)
