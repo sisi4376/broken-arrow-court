@@ -8,6 +8,7 @@ import { stackedGameEvidence, stackedTrial, STACKED_TRIAL_MODEL } from '../src/c
 import { expandedZhanfanAnalysis as zhanfanAnalysis } from '../src/zhanfan.mjs';
 import { STATIC_SOURCES, exportStatic } from '../src/static-export.mjs';
 import { createApplication } from '../src/server.mjs';
+import { LOCAL_POLICY } from '../src/distribution.mjs';
 
 const near=(a,b)=>assert(Math.abs(a-b)<1e-8,`${a} != ${b}`);
 function person(key,values={},special={}){
@@ -113,7 +114,7 @@ test('trial files and algorithms are not part of static publication and private 
 });
 
 test('local trial endpoints require an admin, have no activation endpoint, and leave formal API unchanged',async t=>{
-  let app;const dir=tempDir(t,()=>app?.close());app=createApplication({directory:dir,startScheduler:false,staticOutputDirectory:path.join(dir,'public-site')});
+  let app;const dir=tempDir(t,()=>app?.close());app=createApplication({directory:dir,policy:LOCAL_POLICY,startScheduler:false,staticOutputDirectory:path.join(dir,'public-site')});
   await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));const base=`http://127.0.0.1:${app.server.address().port}`;
   assert.equal((await fetch(base+'/api/analytics/zhanfan/trial')).status,401);assert.equal((await fetch(base+'/trial.html')).status,403);
   const registration=await fetch(base+'/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Owner',username:'trial-owner',password:'trial-password-long'})});

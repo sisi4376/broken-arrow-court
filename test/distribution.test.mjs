@@ -64,13 +64,43 @@ test('release sync cooldown starts at completion, persists on restart, blocks re
 test('release API rejects attempts to change fixed values and reports random schedule and persistent cooldown',async t=>{
  let app;const directory=tempDir(t,()=>app?.close());app=createApplication({directory,policy:RELEASE_POLICY,startScheduler:false,staticOutputDirectory:directory+'/site',sourceOptions:{fetcher:async()=>{throw Error('No upstream traffic');}}});
  app.store.setting('sync_enabled',false);await new Promise(r=>app.server.listen(0,'127.0.0.1',r));
- const base='http://127.0.0.1:'+app.server.address().port;let cookie='',csrf='';
- const request=async(route,method='GET',body)=>{const r=await fetch(base+route,{method,headers:{'Content-Type':'application/json',Cookie:cookie,'X-CSRF-Token':csrf},body:body===undefined?undefined:JSON.stringify(body)});if(r.headers.has('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return {status:r.status,data:await r.json()};};
- await request('/api/register','POST',{name:'Demo',username:'release-owner',password:'test-release-password'});csrf=(await request('/api/session')).data.user.csrf;
+ const base='http://127.0.0.1:'+app.server.address().port;let csrf='';
+ const request=async(route,method='GET',body)=>{const r=await fetch(base+route,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body===undefined?undefined:JSON.stringify(body)});return {status:r.status,data:await r.json()};};
+ assert.equal((await request('/api/register','POST',{name:'Demo'})).status,201);csrf=(await request('/api/session')).data.user.csrf;
  for(const body of [{request_limit_minute:41},{request_limit_hour:101},{request_limit_day:1001},{request_delay_ms:1000}])assert.equal((await request('/api/settings','PATCH',body)).status,400);
  const status=(await request('/api/sync/status')).data;assert.equal(status.settings.sync_schedule.random,true);assert.equal(status.settings.request_delay_ms,2000);assert.deepEqual(status.request_monitor.limits,{minute:40,hour:100,day:1000});
  app.store.setting('sync_next_allowed_at',Date.now()+1800000);assert.equal((await request('/api/sync/run','POST',{})).status,429);assert.equal((await request('/api/sync/run','POST',{kind:'full'})).status,429);
  assert.equal((await request('/api/source/provider','POST',{provider:'batrace'})).status,400);
+});
+
+test('release sets up a local owner once and reopens with no cookies or login',async t=>{
+ let app;const directory=tempDir(t,()=>app?.close());
+ async function start(){
+  app=createApplication({directory,policy:RELEASE_POLICY,startScheduler:false,staticOutputDirectory:directory+'/site'});
+  await new Promise((resolve,reject)=>{app.server.once('error',reject);app.server.listen(0,'127.0.0.1',resolve);});
+  return 'http://127.0.0.1:'+app.server.address().port;
+ }
+ let base=await start();
+ function post(route,body,headers={}){return fetch(base+route,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)});}
+ const openSession=async()=>(await (await fetch(base+'/api/session')).json());
+ const initial=await openSession();assert.equal(initial.local_owner_mode,true);assert.equal(initial.setup_required,true);assert.equal(initial.user,null);
+ assert.equal((await fetch(base+'/api/members')).status,401);
+ assert.equal((await post('/api/register',{name:'Owner'},{Origin:'https://example.test'})).status,403);
+ const attempts=await Promise.all([post('/api/register',{name:'Owner'}),post('/api/register',{name:'Owner'})]);
+ assert.deepEqual(attempts.map(r=>r.status).sort(),[201,409]);
+ assert(attempts.every(r=>!r.headers.has('set-cookie')));
+ const owner=await openSession();assert.equal(owner.setup_required,false);assert.equal(owner.user.role,'admin');
+ assert.equal((await fetch(base+'/api/members')).status,200);
+ assert.equal((await fetch(base+'/api/session',{headers:{'Sec-Fetch-Site':'same-site'}})).status,403);
+ assert.equal((await fetch(base+'/api/session',{headers:{'X-Forwarded-For':'192.0.2.1'}})).status,403);
+ assert.equal((await post('/api/members',{name:'Friend'})).status,403);
+ const csrf={'X-CSRF-Token':owner.user.csrf};
+ assert.equal((await post('/api/members',{name:'Friend'},csrf)).status,201);
+ for(const route of ['/api/login','/api/logout','/api/password','/api/invitations'])assert.equal((await post(route,{},csrf)).status,404,route);
+ await app.close();app=null;base=await start();
+ const reopened=await openSession();assert.equal(reopened.setup_required,false);assert.equal(reopened.user.id,owner.user.id);assert.notEqual(reopened.user.csrf,owner.user.csrf);
+ assert.deepEqual((await (await fetch(base+'/api/members')).json()).members.map(m=>m.name),['Owner','Friend']);
+ assert.equal((await post('/api/register',{name:'Another owner'})).status,409);
 });
 
 test('release API and report transport retain the two-second gap across a restarted client',async t=>{

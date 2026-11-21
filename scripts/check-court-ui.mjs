@@ -5,11 +5,11 @@ import { pathToFileURL } from 'node:url';
 import { createApplication, hashPassword } from '../src/server.mjs';
 import { exportStatic } from '../src/static-export.mjs';
 import { member, rawMatch, detailFor, selfDestructionPrices } from '../test/helpers.mjs';
-import {BUILD_POLICY,RELEASE_POLICY} from '../src/distribution.mjs';
+import {LOCAL_POLICY,RELEASE_POLICY} from '../src/distribution.mjs';
 
 const out=path.resolve(process.argv.includes('--release')?'.cache/court-ui-release':'.cache/court-ui');mkdirSync(out,{recursive:true});
 const directory=mkdtempSync(path.join(out,'data-'));
-const app=createApplication({directory,policy:process.argv.includes('--release')?RELEASE_POLICY:BUILD_POLICY,startScheduler:false,staticOutputDirectory:path.join(directory,'site'),sourceOptions:{fetcher:async()=>new Response('{}',{status:404})}});
+const app=createApplication({directory,policy:process.argv.includes('--release')?RELEASE_POLICY:LOCAL_POLICY,startScheduler:false,staticOutputDirectory:path.join(directory,'site'),sourceOptions:{fetcher:async()=>new Response('{}',{status:404})}});
 app.store.setting('sync_enabled',false);
 member(app.store,'院长',[101]);member(app.store,'朋友与账号',[102]);member(app.store,'后勤科长',[103]);member(app.store,'空降薯条',[104]);
 selfDestructionPrices(app.store);
@@ -34,14 +34,34 @@ try{
   const context=await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:1});
   const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
   page.on('response',r=>{if(r.status()>=400)errors.push(`${r.status()} ${r.url()}`);});
-  await page.goto(url);await page.getByLabel('登录名',{exact:true}).fill('court-ui-owner');await page.getByLabel('密码',{exact:true}).fill('court-ui-test-password');await page.getByRole('button',{name:'登录',exact:true}).click();
+  if(app.store.policy.fixed){
+    const freshDirectory=mkdtempSync(path.join(out,'fresh-owner-'));
+    const fresh=createApplication({directory:freshDirectory,policy:RELEASE_POLICY,startScheduler:false,staticOutputDirectory:path.join(freshDirectory,'site')});
+    try{
+      await new Promise(resolve=>fresh.server.listen(0,'127.0.0.1',resolve));
+      const freshUrl=`http://127.0.0.1:${fresh.server.address().port}`;
+      await page.goto(freshUrl+'/#join/old-invite');
+      await page.getByRole('heading',{name:'创建你的法庭',exact:true}).waitFor();
+      assert.equal(await page.locator('#local-setup-form input').count(),1);
+      await page.getByLabel('你的称呼',{exact:true}).fill('本机测试');
+      await page.getByRole('button',{name:'创建法庭',exact:true}).click();
+      await page.getByRole('heading',{name:'审判大厅',exact:true}).waitFor();
+      assert.equal((await context.cookies(freshUrl)).length,0);
+      const freshBrowserContext=await browser.newContext();
+      try{const reopened=await freshBrowserContext.newPage();await reopened.goto(freshUrl);await reopened.getByRole('heading',{name:'审判大厅',exact:true}).waitFor();}
+      finally{await freshBrowserContext.close();}
+    }finally{await fresh.close();}
+  }
+  await page.goto(url);
+  if(!app.store.policy.fixed){await page.getByLabel('登录名',{exact:true}).fill('court-ui-owner');await page.getByLabel('密码',{exact:true}).fill('court-ui-test-password');await page.getByRole('button',{name:'登录',exact:true}).click();}
   await page.getByRole('heading',{name:'审判大厅',exact:true}).waitFor();
+  if(app.store.policy.fixed)assert.equal(await page.locator('[data-action="logout"]').count(),0);
   assert.equal(await page.locator('[data-action="toggle-court-mode"]').count(),0);
   assert.equal(app.store.settings().court_mode,true);
   await page.screenshot({path:path.join(out,'court-dashboard-desktop.png'),fullPage:true});
   for(const [route,label]of [['members','看守所'],['matches','对局卷宗'],['sync','书记官室']]){
     await page.locator(`nav a[href="#${route}"]`).click();await page.getByRole('heading',{name:label,exact:true}).waitFor();
-    if(route==='members')assert.equal(await page.locator('.member-heading h2 a[href="#friend/2"]').textContent(),'朋友与账号');
+    if(route==='members'){assert.equal(await page.locator('.member-heading h2 a[href="#friend/2"]').textContent(),'朋友与账号');if(app.store.policy.fixed)assert.equal(await page.locator('[data-action="invite"],[data-action="reset-password"]').count(),0);}
     if(route==='sync'){
       assert.equal(await page.locator('.court-mode-panel').count(),0);
       assert.equal(await page.locator('#source-provider-settings select').inputValue(),'official');
@@ -140,5 +160,5 @@ try{
   app.store.setting('court_mode',false);await exportStatic(app.store,{directory:app.staticDirectory});
   await viewer.goto(url+'/readonly/');await viewer.getByRole('heading',{name:'审判大厅',exact:true}).waitFor();
   assert.equal(await viewer.locator('html').getAttribute('data-court-mode'),'on');
-  assert.deepEqual(errors,[]);console.log(JSON.stringify({ok:true,screenshots:out,checks:['permanent court UI','legacy setting compatibility','authored copy only','all routes on mobile','read-only court UI','no theme controls','no browser errors']},null,2));
+  assert.deepEqual(errors,[]);console.log(JSON.stringify({ok:true,screenshots:out,checks:[...(app.store.policy.fixed?['one-time local owner setup','no login after reopening']:['local edition login']),'permanent court UI','legacy setting compatibility','authored copy only','all routes on mobile','read-only court UI','no theme controls','no browser errors']},null,2));
 }finally{await browser?.close();await app.close();}

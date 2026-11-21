@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { Store, now, digest } from './db.mjs';
+import { BUILD_POLICY } from './distribution.mjs';
 import { createSource,sourceProvider,sourceProviders } from './source-provider.mjs';
 import { requestStatistics } from './request-statistics.mjs';
 import { localStorage } from './local-storage.mjs';
@@ -29,6 +30,7 @@ import { overallAnalysis, friendAnalysis, deckModel, identifyDeck, specName } fr
 const scrypt = promisify(scryptCallback);
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const COOKIE = 'court_session';
+const loopbackAddresses = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const assert = (condition, status, message) => { if (!condition) throw new HttpError(status, message); };
 const nameInput = (value) => { const s = String(value ?? '').trim(); assert(s.length >= 1 && s.length <= 40, 400, '朋友称呼需为 1 至 40 个字符'); return s; };
@@ -55,6 +57,9 @@ async function readBody(req, max = 1024 * 1024) {
 
 export function createApplication({ directory = process.env.DATA_DIR || path.join(ROOT, 'data'), sourceOptions, startScheduler = true, shutdownToken = null, staticOutputDirectory,policy } = {}) {
   const store = new Store(directory,{policy});
+  const localOwnerMode = store.policy.edition === 'release';
+  const localOwnerCsrf = localOwnerMode ? randomBytes(24).toString('hex') : null;
+  const localOwner = () => store.get("SELECT u.id,u.member_id,u.username,u.role,m.name FROM users u JOIN members m ON m.id=u.member_id WHERE u.role='admin' AND m.active=1 ORDER BY u.id LIMIT 1");
   let source = createSource(store, sourceOptions);
   const engine = new SyncEngine(store, source);
   const staticDirectory = path.resolve(staticOutputDirectory || process.env.STATIC_OUTPUT_DIR || path.join(ROOT, 'site'));
@@ -86,6 +91,10 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
     assert(entry.count <= limit, 429, '请求过于频繁，请稍后重试');
   }
   function session(req) {
+    if (localOwnerMode) {
+      const owner = localOwner();
+      return owner ? { ...owner, csrf: localOwnerCsrf } : null;
+    }
     const token = String(req.headers.cookie ?? '').split(';').map((x) => x.trim()).find((x) => x.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
     if (!token || !/^[\da-f]{64}$/.test(token)) return null;
     return store.get('SELECT u.id,u.member_id,u.username,u.role,m.name,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id JOIN members m ON m.id=u.member_id WHERE s.token_hash=? AND s.expires_at>? AND m.active=1', digest(token), now()) ?? null;
@@ -124,6 +133,18 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
       }
       if (route === '/readonly') { res.writeHead(302, { Location: '/readonly/' }); res.end(); return; }
       if (route.startsWith('/readonly/')) return await serveStatic(req, res, staticDirectory, route.slice('/readonly/'.length));
+      if (localOwnerMode) {
+        const port = req.socket.localPort;
+        const hosts = ['127.0.0.1', 'localhost', '[::1]'].map((host) => `${host}:${port}`);
+        if (port === 80) hosts.push('127.0.0.1', 'localhost', '[::1]');
+        const host = String(req.headers.host ?? '').toLowerCase();
+        const direct = !['forwarded','x-forwarded-for','x-forwarded-host','x-forwarded-proto'].some((header) => req.headers[header] !== undefined);
+        assert(direct && loopbackAddresses.has(req.socket.localAddress) && loopbackAddresses.has(req.socket.remoteAddress) && hosts.includes(host), 403, '发布版管理页仅供本机直接访问');
+        const site = req.headers['sec-fetch-site'];
+        assert(!site || site === 'same-origin' || site === 'none', 403, '不允许跨站访问本机管理页');
+        assert(!req.headers.origin || req.headers.origin === `http://${host}`, 403, '请求来源不匹配');
+        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+      }
       if (!route.startsWith('/api/')) {
         assert(['GET','HEAD'].includes(req.method), 405, '不支持此请求方法');
         const files = { '/': ['index.html','text/html'], '/app.js': ['app.js','text/javascript'], '/analysis.js': ['analysis.js','text/javascript'], '/performance.js': ['performance.js','text/javascript'], '/zhanfan.js': ['zhanfan.js','text/javascript'], '/table-sort.js': ['table-sort.js','text/javascript'], '/style.css': ['style.css','text/css'], '/icons.js': ['icons.js','text/javascript'], '/favicon.svg': ['favicon.svg','image/svg+xml'] };
@@ -146,7 +167,7 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
         let body;try{body=await readFile(path.join(ROOT, 'public', file[0]));}catch(e){if(e.code==='ENOENT')throw new HttpError(404,'文件不存在');throw e;}
         res.writeHead(200, { 'Content-Type': file[1]==='image/png'?file[1]:`${file[1]}; charset=utf-8` }); res.end(req.method === 'HEAD' ? undefined : body); return;
       }
-      if (!['GET','HEAD'].includes(req.method)) {
+      if (!localOwnerMode && !['GET','HEAD'].includes(req.method)) {
         const origin = req.headers.origin;
         const expected = process.env.PUBLIC_ORIGIN || `${req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`;
         assert(!origin || origin === expected, 403, '请求来源不匹配');
@@ -175,7 +196,10 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
         json(res, { ok: true }); setTimeout(() => onShutdown?.(), 100).unref(); return;
       }
       const user = session(req);
-      if (route === '/api/session' && req.method === 'GET') return json(res, { user, setup_required: !store.get('SELECT id FROM users LIMIT 1'), title: TITLE, ui: { court_mode: store.settings().court_mode === true } });
+      if (route === '/api/session' && req.method === 'GET') return json(res, { user, setup_required: localOwnerMode ? !user : !store.get('SELECT id FROM users LIMIT 1'), local_owner_mode: localOwnerMode, title: TITLE, ui: { court_mode: store.settings().court_mode === true } });
+      if (localOwnerMode && (/^\/api\/(?:login|logout|password|invitation|invitations)$/.test(route) || /^\/api\/users\/\d+\/password$/.test(route))) {
+        throw new HttpError(404, '发布版本机管理无需登录或邀请');
+      }
       if (route === '/api/invitation' && req.method === 'GET') {
         rate(req, 'invite-check', 60);
         const code = String(url.searchParams.get('code') ?? '').slice(0,100);
@@ -184,6 +208,19 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
       }
       if (route === '/api/register' && req.method === 'POST') {
         rate(req, 'register'); const body = await readBody(req);
+        if (localOwnerMode) {
+          assert(!user, 409, '法庭已经创建，请刷新页面');
+          const name = nameInput(body.name);
+          const username = `local-owner-${randomBytes(8).toString('hex')}`;
+          const hash = await hashPassword(randomBytes(32).toString('hex'));
+          store.transaction(() => {
+            assert(!localOwner(), 409, '法庭已经创建，请刷新页面');
+            const memberId = Number(store.run('INSERT INTO members(name,created_at) VALUES(?,?)', name, now()).lastInsertRowid);
+            const id = Number(store.run('INSERT INTO users(member_id,username,password_hash,role,created_at) VALUES(?,?,?,?,?)', memberId, username, hash, 'admin', now()).lastInsertRowid);
+            store.audit(id, 'register', { memberId });
+          });
+          return json(res, { ok: true }, 201);
+        }
         const username = usernameInput(body.username); const password = passwordInput(body.password);
         const name = nameInput(body.name); const hash = await hashPassword(password);
         const id = store.transaction(() => {
@@ -216,8 +253,8 @@ export function createApplication({ directory = process.env.DATA_DIR || path.joi
         assert(account && account.active && good, 401, '登录名或密码错误');
         setSession(res, account.id); return json(res, { ok: true });
       }
-      assert(user, 401, '请先登录');
-      if (!['GET','HEAD'].includes(req.method)) assert(req.headers['x-csrf-token'] === user.csrf, 403, '登录状态已变化，请刷新页面后重试');
+      assert(user, 401, localOwnerMode ? '请先创建法庭' : '请先登录');
+      if (!['GET','HEAD'].includes(req.method)) assert(req.headers['x-csrf-token'] === user.csrf, 403, localOwnerMode ? '后台状态已变化，请刷新页面后重试' : '登录状态已变化，请刷新页面后重试');
       if (route === '/api/logout' && req.method === 'POST') {
         store.run('DELETE FROM sessions WHERE user_id=? AND csrf=?', user.id, user.csrf);
         res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`); return json(res, { ok: true });
@@ -495,7 +532,7 @@ async function main() {
   const lock=await open(lockPath,'wx');await lock.writeFile(JSON.stringify({pid:process.pid}));await lock.close();
   const shutdownToken=randomBytes(32).toString('hex');
   const app=createApplication({directory,shutdownToken});
-  let port=Number(process.env.PORT||4317);const host=process.env.HOST||'127.0.0.1';
+  let port=Number(process.env.PORT||4317);const host=BUILD_POLICY.edition==='release'?'127.0.0.1':(process.env.HOST||'127.0.0.1');
   for(let attempt=0;;attempt++){
     try {await new Promise((resolve,reject)=>{app.server.once('error',reject);app.server.listen(port,host,()=>{app.server.removeListener('error',reject);resolve();});});break;}
     catch(error){if(error.code==='EADDRINUSE'&&attempt<10){port++;continue;}await unlink(lockPath).catch(()=>{});throw error;}
